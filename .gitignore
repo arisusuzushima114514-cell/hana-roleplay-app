@@ -1,0 +1,17 @@
+*.iml
+.gradle/
+build/
+/app/build/
+/local.properties
+.idea/
+.idea/workspace.xml
+.idea/misc.xml
+.idea/deploymentTargetSelector.xml
+captures/
+*.apk
+*.aab
+*.ap_
+*.log
+*.keystore
+*.jks
+/.kotlin/
