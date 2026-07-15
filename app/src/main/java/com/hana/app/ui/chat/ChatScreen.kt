@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -92,6 +93,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Path
@@ -193,11 +195,12 @@ fun ChatScreen(
             ))
         }
     }
-    val bottomAnchorIndex = displayMessages.size
+    val bottomAnchorIndex = maxOf(0, displayMessages.size - 1)
     val density = LocalDensity.current
     val bottomContentPadding = with(density) { inputBarHeightPx.toDp() } + 24.dp
 
-    LaunchedEffect(listState, displayMessages.size, hasMoreHistory) {
+    // 加载更多历史（滚动到顶部时触发）
+    LaunchedEffect(displayMessages.size, hasMoreHistory) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.minOfOrNull { it.index } ?: 0 }
             .distinctUntilChanged()
             .collect { firstVisibleIndex ->
@@ -210,32 +213,40 @@ fun ChatScreen(
             }
     }
 
+    // 新消息 / 流式开始时平滑滚到底
     LaunchedEffect(displayMessages.size, uiState.streamingAssistant != null) {
         if (displayMessages.isNotEmpty()) {
-            listState.scrollToItem(bottomAnchorIndex)
+            listState.animateScrollToItem(bottomAnchorIndex)
         }
     }
 
+    // 外部触发滚动
     LaunchedEffect(Unit) {
         onScrollTrigger?.collect {
             if (displayMessages.isNotEmpty()) {
-                listState.scrollToItem(bottomAnchorIndex)
+                listState.animateScrollToItem(bottomAnchorIndex)
             }
         }
     }
 
+    // 错误提示
     LaunchedEffect(Unit) {
         errorFlow?.collect { msg ->
             snackbarHostState.showSnackbar(msg)
         }
     }
 
+    // 发送中持续跟随底部（用户手动上滑时停止跟随）
     LaunchedEffect(uiState.isSending) {
         while (uiState.isSending) {
-            if (displayMessages.isNotEmpty() && listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index == bottomAnchorIndex) {
-                listState.scrollToItem(bottomAnchorIndex)
+            if (displayMessages.isNotEmpty()) {
+                val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()
+                // 用户未手动上滑（最后可见项接近底部）时才自动滚到底
+                if (lastVisible != null && lastVisible.index >= bottomAnchorIndex - 1) {
+                    listState.animateScrollToItem(bottomAnchorIndex)
+                }
             }
-            delay(450)
+            delay(400)
         }
     }
 
@@ -456,7 +467,7 @@ private fun ContextDivider() {
 }
 
 @Composable
-private fun BlinkingCursor(): String {
+private fun blinkingCursor(): String {
     var visible by remember { mutableStateOf(true) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -631,7 +642,7 @@ private fun MessageBubble(
                         }
                         SelectionContainer {
                             MessageContent(
-                                text = displayText + if (isStreaming) BlinkingCursor() else "",
+                                text = displayText + if (isStreaming) blinkingCursor() else "",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = if (isUser) {
                                     MaterialTheme.colorScheme.onPrimaryContainer
@@ -819,6 +830,145 @@ private fun MessageBubble(
 }
 
 @Composable
+private fun AttachmentThumbnailRow(
+    attachments: List<ChatAttachment>,
+    onRemove: (Int) -> Unit,
+    onCaptionChange: (Int, String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        attachments.forEachIndexed { index, attachment ->
+            when (attachment.kind) {
+                IMAGE -> {
+                    Column(
+                        modifier = Modifier.width(100.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        // 缩略图 + 删除按钮 + 序号
+                        Box(modifier = Modifier.size(72.dp)) {
+                            AsyncImage(
+                                model = attachment.uri,
+                                contentDescription = attachment.name,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(RoundedCornerShape(10.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                            IconButton(
+                                onClick = { onRemove(index) },
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .size(20.dp)
+                                    .offset(x = 4.dp, y = (-4).dp)
+                                    .background(
+                                        Color.Black.copy(alpha = 0.55f),
+                                        RoundedCornerShape(50)
+                                    )
+                            ) {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = "移除",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                            }
+                            if (attachments.size > 1) {
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = Color.Black.copy(alpha = 0.5f),
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .padding(4.dp)
+                                ) {
+                                    Text(
+                                        "${index + 1}",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                    )
+                                }
+                            }
+                        }
+                        // 图片说明文字输入
+                        OutlinedTextField(
+                            value = attachment.caption,
+                            onValueChange = { onCaptionChange(index, it) },
+                            placeholder = { Text("图${index + 1}说明", style = MaterialTheme.typography.labelSmall) },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 4.dp)
+                                .height(44.dp),
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                    }
+                }
+
+                FILE -> {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        modifier = Modifier.width(120.dp).height(72.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(8.dp),
+                            verticalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Icon(Icons.Filled.AttachFile, null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                                Text(
+                                    attachment.name.take(10),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    formatBytes(attachment.sizeBytes),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                IconButton(
+                                    onClick = { onRemove(index) },
+                                    modifier = Modifier.size(16.dp)
+                                ) {
+                                    Icon(Icons.Filled.Close, "移除", modifier = Modifier.size(12.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 添加更多按钮
+        if (attachments.isNotEmpty() && attachments.size < 6) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                modifier = Modifier.size(72.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Filled.Add, "添加更多", modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("${attachments.size}/6", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun AttachmentPreviewList(
     attachments: List<ChatAttachment>,
     onSaveAttachmentImage: (String) -> Unit,
@@ -855,7 +1005,6 @@ private fun AttachmentPreviewList(
                         }
                     }
                 }
-
                 FILE -> {
                     Surface(
                         shape = RoundedCornerShape(14.dp),
@@ -1280,12 +1429,26 @@ private fun ChatInputBar(
     val stopLabel = stringResource(R.string.stop)
     val imageNotSupportedMessage = stringResource(R.string.image_not_supported)
     val fileNotSupportedMessage = stringResource(R.string.file_not_supported)
-    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        val newUris = uris.take(6)
+        if (newUris.isEmpty()) return@rememberLauncherForActivityResult
+        val remaining = 6 - pendingAttachments.size
+        if (remaining <= 0) {
+            Toast.makeText(context, "最多上传6张图片", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        val toAdd = newUris.take(remaining)
+        var added = 0
+        toAdd.forEach { uri ->
             onPersistImageAttachment(uri) { attachment ->
-                if (attachment != null) pendingAttachments = pendingAttachments + attachment
-                else Toast.makeText(context, "图片添加失败", Toast.LENGTH_SHORT).show()
+                if (attachment != null) {
+                    pendingAttachments = pendingAttachments + attachment
+                    added++
+                }
             }
+        }
+        if (added == 0 && toAdd.isNotEmpty()) {
+            Toast.makeText(context, "图片添加失败", Toast.LENGTH_SHORT).show()
         }
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -1308,7 +1471,11 @@ private fun ChatInputBar(
         if (pendingAttachments.isEmpty()) {
             onSend()
         } else {
-            onQuickSend(encodeChatContent(value, pendingAttachments))
+            val captions = pendingAttachments
+                .filter { it.kind == AttachmentKind.IMAGE && it.caption.isNotBlank() }
+                .mapIndexed { i, a -> "[图${i + 1}] ${a.caption}" }
+            val captionText = if (captions.isNotEmpty()) "\n" + captions.joinToString("\n") else ""
+            onQuickSend(encodeChatContent(value + captionText, pendingAttachments))
             pendingAttachments = emptyList()
         }
     }
@@ -1382,9 +1549,14 @@ private fun ChatInputBar(
                 )
             }
             if (pendingAttachments.isNotEmpty()) {
-                AttachmentPreviewList(
+                AttachmentThumbnailRow(
                     attachments = pendingAttachments,
-                    onSaveAttachmentImage = onSaveAttachmentImage,
+                    onRemove = { index -> pendingAttachments = pendingAttachments.toMutableList().also { it.removeAt(index) } },
+                    onCaptionChange = { index, caption ->
+                        pendingAttachments = pendingAttachments.toMutableList().also {
+                            it[index] = it[index].copy(caption = caption)
+                        }
+                    },
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
             }

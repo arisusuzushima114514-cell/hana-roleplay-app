@@ -10,6 +10,7 @@ import android.graphics.Shader
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.lifecycle.ViewModel
@@ -487,7 +488,12 @@ class ChatViewModel(
                     put(MediaStore.Downloads.MIME_TYPE, "text/markdown")
                     put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 }
-                val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("创建文件失败")
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("创建文件失败")
+                } else {
+                    val file = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName)
+                    android.net.Uri.fromFile(file)
+                }
                 context.contentResolver.openOutputStream(uri)?.use { it.write(body.toByteArray(Charsets.UTF_8)) }
                 fileName
             }.onSuccess { onResult(true, it) }
@@ -754,7 +760,12 @@ class ChatViewModel(
                     put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 }
                 val resolver = context.contentResolver
-                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("无法创建备份文件")
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("无法创建备份文件")
+                } else {
+                    val file = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName)
+                    android.net.Uri.fromFile(file)
+                }
                 resolver.openOutputStream(uri)?.use { it.write(payload.toByteArray(Charsets.UTF_8)) } ?: error("无法写入备份文件")
                 fileName
             }.onSuccess { onResult(true, it) }
@@ -940,8 +951,13 @@ class ChatViewModel(
                     put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 }
                 val resolver = context.contentResolver
-                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                    ?: error("Cannot create export file")
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        ?: error("Cannot create export file")
+                } else {
+                    val file = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName)
+                    android.net.Uri.fromFile(file)
+                }
                 resolver.openOutputStream(uri)?.use { output ->
                     output.write(body.toByteArray(Charsets.UTF_8))
                 } ?: error("Cannot open export file")
@@ -1941,7 +1957,7 @@ class ChatViewModel(
                 java.util.Calendar.SATURDAY -> "星期六"; else -> ""
             }
             append(dow).append(" ")
-            append(String.format("%02d:%02d", now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE)))
+            append(String.format(java.util.Locale.US, "%02d:%02d", now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE)))
         }
 
         val webSearchEnabled = _uiState.value.webSearchEnabled
@@ -1966,7 +1982,8 @@ class ChatViewModel(
             }
             append(systemPrompt)
             append("\n\n[").append(timeInfo).append("]")
-            if (effectiveModel != null && effectiveModel.isNotBlank()) {
+            // 角色对话中跳过模型版本声明（节省token且角色不需要知道自己是AI）
+            if (conversation?.characterId == null && effectiveModel != null && effectiveModel.isNotBlank()) {
                 append("\n你的模型版本: $effectiveModel")
                 append("\n当用户询问你是哪个模型/哪个AI/哪个版本时，请如实回答你是 $effectiveModel。")
             }
@@ -1999,10 +2016,13 @@ class ChatViewModel(
             contextHistory.forEach { message ->
                 if (message.role != "system") {
                     val decoded = decodeChatContent(message.content)
-                    val imageData = if (supportsVisionForRequest) {
+                    val imageData: List<String> = if (supportsVisionForRequest) {
                         decoded.attachments.filter { it.kind == AttachmentKind.IMAGE }.mapNotNull { attachmentService.asImageDataUrl(it) }
                     } else {
-                        emptyList()
+                        // 非视觉模型：图片转线稿（后台静默转换，不增加额外文字）
+                        decoded.attachments.filter { it.kind == AttachmentKind.IMAGE }.mapNotNull { attachment ->
+                            attachmentService.toLineArtBase64(attachment.uri)?.first
+                        }
                     }
                     val fileTexts = decoded.attachments.filter { it.kind == AttachmentKind.FILE }.mapNotNull { attachment ->
                         attachmentService.extractReadableText(attachment)?.let { text ->

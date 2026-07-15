@@ -10,8 +10,8 @@ class ConversationRepository(
     private val dao: ConversationDao
 ) {
     companion object {
-        const val DEFAULT_CONTEXT_LIMIT = 36
-        const val GROUP_CONTEXT_LIMIT = 20
+        const val DEFAULT_CONTEXT_LIMIT = 20
+        const val GROUP_CONTEXT_LIMIT = 14
     }
 
     fun observeConversations(): Flow<List<ConversationEntity>> = dao.observeAll()

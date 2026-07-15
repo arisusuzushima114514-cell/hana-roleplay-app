@@ -137,6 +137,55 @@ class AttachmentService(
         }.getOrNull()
     }
 
+    /** 将图片转为线稿风格（用于非视觉模型识别图片内容） */
+    suspend fun toLineArtBase64(uriString: String, maxWidth: Int = 512): Pair<String, String>? = withContext(Dispatchers.IO) {
+        runCatching {
+            val original = loadImageBitmap(uriString) ?: return@runCatching null
+            // 缩放到合理尺寸
+            val scale = maxWidth.toFloat() / maxOf(original.width, original.height)
+            val w = (original.width * scale).toInt().coerceAtLeast(1)
+            val h = (original.height * scale).toInt().coerceAtLeast(1)
+            val scaled = Bitmap.createScaledBitmap(original, w, h, true)
+
+            // 灰度 + 边缘检测（Sobel 简化版）
+            val pixels = IntArray(w * h)
+            scaled.getPixels(pixels, 0, w, 0, 0, w, h)
+            val gray = IntArray(w * h) { i ->
+                val c = pixels[i]
+                ((android.graphics.Color.red(c) * 0.299 + android.graphics.Color.green(c) * 0.587 + android.graphics.Color.blue(c) * 0.114)).toInt()
+            }
+
+            val edge = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val edgePixels = IntArray(w * h)
+            for (y in 1 until h - 1) {
+                for (x in 1 until w - 1) {
+                    val idx = y * w + x
+                    val gx = -gray[idx - w - 1] - 2 * gray[idx - 1] - gray[idx + w - 1] +
+                        gray[idx - w + 1] + 2 * gray[idx + 1] + gray[idx + w + 1]
+                    val gy = -gray[idx - w - 1] - 2 * gray[idx - w] - gray[idx - w + 1] +
+                        gray[idx + w - 1] + 2 * gray[idx + w] + gray[idx + w + 1]
+                    val mag = (kotlin.math.sqrt((gx * gx + gy * gy).toDouble())).toInt().coerceIn(0, 255)
+                    // 反转：白底黑线
+                    val inv = 255 - mag
+                    edgePixels[idx] = android.graphics.Color.rgb(inv, inv, inv)
+                }
+            }
+            edge.setPixels(edgePixels, 0, w, 0, 0, w, h)
+
+            val stream = java.io.ByteArrayOutputStream()
+            edge.compress(Bitmap.CompressFormat.PNG, 80, stream)
+            val base64 = android.util.Base64.encodeToString(stream.toByteArray(), android.util.Base64.NO_WRAP)
+            Pair("data:image/png;base64,$base64", "（图片尺寸：${original.width}x${original.height}）")
+        }.getOrNull()
+    }
+
+    /** 判断当前模型是否为非视觉模型（需要线稿转换） */
+    fun needsLineArtConversion(modelName: String): Boolean {
+        val lower = modelName.lowercase()
+        val visionKeywords = listOf("vision", "vl", "gpt-4o", "gpt-4v", "gemini", "claude", "grok", "pixtral", "cogvlm", "llava", "minicpm-v", "internvl", "step-1v")
+        return visionKeywords.none { lower.contains(it) }
+    }
+
     private fun attachmentsDir(): File {
         val dir = File(appContext.filesDir, "chat_attachments")
         if (!dir.exists()) dir.mkdirs()

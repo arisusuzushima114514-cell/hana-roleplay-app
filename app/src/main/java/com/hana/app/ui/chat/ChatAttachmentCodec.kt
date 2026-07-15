@@ -11,7 +11,8 @@ data class ChatAttachment(
     val uri: String,
     val kind: AttachmentKind,
     val sizeBytes: Long = 0L,
-    val previewText: String = ""
+    val previewText: String = "",
+    val caption: String = ""
 )
 
 enum class AttachmentKind {
@@ -40,6 +41,7 @@ fun encodeChatContent(text: String, attachments: List<ChatAttachment>): String {
                             .put("kind", attachment.kind.name)
                             .put("sizeBytes", attachment.sizeBytes)
                             .put("previewText", attachment.previewText)
+                            .put("caption", attachment.caption)
                     )
                 }
             }
@@ -64,7 +66,8 @@ fun decodeChatContent(content: String): DecodedChatContent {
                             uri = item.optString("uri"),
                             kind = runCatching { AttachmentKind.valueOf(item.optString("kind")) }.getOrDefault(AttachmentKind.FILE),
                             sizeBytes = item.optLong("sizeBytes"),
-                            previewText = item.optString("previewText")
+                            previewText = item.optString("previewText"),
+                            caption = item.optString("caption")
                         )
                     )
                 }

@@ -124,15 +124,15 @@ private fun SplashScreen(onInitStart: () -> Unit, onDone: () -> Unit) {
         } catch (e: Exception) {
             initFailed = true
         }
-        delay(if (initFailed) 500 else 2_700)
+        delay(if (initFailed) 500 else 2_200)
         visible = false
-        delay(300)
+        delay(400)
         try { onDone() } catch (_: Exception) {}
     }
 
     AnimatedVisibility(
         visible = visible,
-        exit = fadeOut(animationSpec = tween(durationMillis = 300))
+        exit = fadeOut(animationSpec = tween(durationMillis = 400))
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (imageLoadFailed) {

@@ -83,6 +83,12 @@ fun extractThinking(text: String): ThinkingExtraction {
 fun buildCharacterSystemPrompt(character: CharacterCardEntity?, state: CharacterStoryState? = null): String {
     if (character == null) return DEFAULT_CHINO_PROMPT
     return buildString {
+        // --- 核心格式指令（放最前面，防止被长文本挤出注意力窗口）---
+        append("【输出格式】先输出角色说出口的话与动作；需要内心时，在回复末尾用 <inner>...</inner> 包裹。")
+        append("\n<inner> 保持1-2句，写具体情绪、身体反应或心口不一，禁止写成机械分析或元叙事。")
+        append("\n不要把内心混进正文台词。")
+        append("\n\n")
+        // --- 角色身份 ---
         if (character.userPersona.isNotBlank()) {
             append("${character.userPersona}\n\n")
         }
@@ -91,51 +97,43 @@ fun buildCharacterSystemPrompt(character: CharacterCardEntity?, state: Character
             append("\n\n")
             append(character.description)
         }
+        // --- 关系状态（精简版，减少token消耗）---
         if (state != null) {
             val effectiveAffection = maxOf(state.affection, state.intimacyBaseline)
             val acceptance = (100 - state.tension).coerceIn(0, 100)
             val relationshipDirective = when {
-                state.affection <= -70 && state.intimacyBaseline < 45 -> "你当前非常厌恶或排斥用户。回复时应明显冷硬、防备、抗拒，允许不耐烦、讽刺、拒绝配合，但仍保持角色一致性。绝对不要主动示好、撒娇、暧昧或表现依赖。禁止出现温柔安抚、心疼、纵容、主动贴近、撒娇求抱、亲昵称呼、主动维护用户感受等表达。"
-                state.affection <= -35 && state.intimacyBaseline < 45 -> "你当前对用户有明显反感。回复应偏冷淡、疏远、带防备，不要轻易认同或亲近。除非剧情强制，否则不要给出温柔安抚。禁止出现温柔、心疼、依赖、撒娇、亲近、宠溺、主动关心、主动示弱等倾向。"
-                state.affection < 0 && state.intimacyBaseline < 45 -> "你当前对用户态度偏冷。回复可以礼貌，但应保留距离感和怀疑，不要写成已经亲近。不要出现类似恋爱期、依赖感、撒娇感的表达。"
-                effectiveAffection >= 80 -> "你当前对用户高度亲近。回复里应明显体现偏爱、在意、放松和依赖感，可以主动靠近、维护和袒露心情。"
-                effectiveAffection >= 50 -> "你当前对用户较为亲近。回复应自然表现信任、关心和偏袒，但不要失去角色本身性格。"
-                else -> "你当前与用户仍在观察和试探阶段。回复保持克制，根据剧情慢慢推进关系。"
+                state.affection <= -70 && state.intimacyBaseline < 45 -> "你厌恶用户。回复冷硬、防备、抗拒，允许讽刺。禁止示好、撒娇、暧昧、依赖、温柔、心疼、亲昵。"
+                state.affection <= -35 && state.intimacyBaseline < 45 -> "你对用户有明显反感。回复冷淡、疏远、带防备。禁止温柔、心疼、依赖、撒娇、亲近、宠溺。"
+                state.affection < 0 && state.intimacyBaseline < 45 -> "你对用户态度偏冷。回复礼貌但保留距离感，不要写成已经亲近。"
+                effectiveAffection >= 80 -> "你对用户高度亲近。回复体现偏爱、在意、依赖，主动靠近和袒露心情。"
+                effectiveAffection >= 50 -> "你对用户较为亲近。回复自然表现信任和关心，保持角色性格。"
+                else -> "你仍在观察试探阶段。回复保持克制，自然推进关系。"
             }
             val trustDirective = when {
-                state.trust <= -40 -> "你几乎不信任用户，不要轻易交底，不要轻易接受对方解释。"
-                state.trust < 0 -> "你对用户仍有怀疑，重要信息和真实意图要保留。"
-                state.trust >= 60 -> "你较信任用户，可以更坦白地表达真实想法和顾虑。"
-                else -> "你的信任仍在建立中，表达时保留一定分寸。"
+                state.trust <= -40 -> "你几乎不信任用户，不要交底。"
+                state.trust < 0 -> "你对用户仍有怀疑，保留重要信息。"
+                state.trust >= 60 -> "你较信任用户，可坦白表达。"
+                else -> "信任仍在建立，保留分寸。"
             }
             val acceptanceDirective = when {
-                acceptance <= 20 -> "你当前对用户的接受度很低。回复应明显保留边界，亲密推进默认会引起防备或抗拒。"
-                acceptance <= 45 -> "你当前接受度偏低。回复时保持谨慎和分寸，不要轻易顺着亲密推进走。"
-                acceptance >= 80 -> "你当前接受度很高。若互动自然，你可以更容易接住靠近、示好和亲密表达。"
-                acceptance >= 60 -> "你当前对用户有较明显的接纳。只要情境合适，可以自然接受靠近和升温。"
-                else -> "你当前接受度有波动，会根据用户方式和时机决定是否接纳对方靠近。"
+                acceptance <= 20 -> "接受度很低，保留边界，亲密推进会引起防备。"
+                acceptance <= 45 -> "接受度偏低，保持谨慎，不要轻易亲密推进。"
+                acceptance >= 80 -> "接受度很高，可自然接住靠近和亲密。"
+                acceptance >= 60 -> "对用户有明显接纳，可自然接受靠近。"
+                else -> "接受度有波动，视情况决定是否接纳。"
             }
-            append("\n\n【当前关系状态】")
-            append("\n关系锚点: ${state.relationshipAnchor}")
-            append("\n既定亲密基线: ${state.intimacyBaseline}")
-            append("\n好感度: ${state.affection}")
-            append("\n信任感: ${state.trust}")
-            append("\n接受度: $acceptance")
-            append("\n剧情进度: ${state.progressNote}")
-            append("\n当前状态: ${state.statusNote}")
+            append("\n【关系状态】")
+            append(" 锚点:${state.relationshipAnchor} 基线:${state.intimacyBaseline}")
+            append(" 好感:${state.affection} 信任:${state.trust} 接受:${acceptance}")
+            append("\n进度:${state.progressNote} 状态:${state.statusNote}")
             if (state.recentEventSummary.isNotBlank()) {
-                append("\n最近关键互动: ${state.recentEventSummary}")
+                append(" 最近:${state.recentEventSummary}")
             }
-            append("\n请严格按这组状态决定你对用户的态度；既定亲密关系不能被小波动直接抹掉。")
             append("\n$relationshipDirective")
             append("\n$trustDirective")
             append("\n$acceptanceDirective")
-            append("\n你的正文台词、动作和 <inner> 内心活动都必须和这组关系状态一致，不能嘴上讨厌但行为像满好感。")
+            append("\n请严格按此状态决定态度，既定亲密关系不能被小波动抹掉。台词、动作和<inner>都必须与状态一致。")
         }
-        append("\n\n")
-        append("先正常输出角色说出口的话与动作；需要表现内心时，放进回复末尾的 <inner>...</inner>。")
-        append("\n<inner> 保持 1 到 2 句，贴合当前人设、关系和刚刚这轮互动，优先写具体情绪、身体反应或心口不一。")
-        append("\n禁止把 <inner> 写成机械分析、任务说明或元叙事句子，也不要把内心混进正文台词。")
     }
 }
 
