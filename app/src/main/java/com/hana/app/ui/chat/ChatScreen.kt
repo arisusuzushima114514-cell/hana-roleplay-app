@@ -130,6 +130,7 @@ import com.hana.app.data.db.entity.ModelInfo
 import com.hana.app.ui.character.CharacterAvatar
 import com.hana.app.ui.chat.AttachmentKind.FILE
 import com.hana.app.ui.chat.AttachmentKind.IMAGE
+import com.hana.app.ui.settings.detectNativeWebSearchSupport
 import com.hana.app.viewmodel.ChatUiState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -156,8 +157,8 @@ fun ChatScreen(
     onSaveAttachmentImage: (String) -> Unit = {},
     onStopGeneration: () -> Unit,
     onRetryLastUserMessage: () -> Unit,
-    onUpdateConversationParameters: (String?, Float, Float, Int, Int) -> Unit,
-    onUpdateSystemPrompt: (String) -> Unit,
+    onUpdateConversationParameters: (String?, Float, Float, Int, Int, String?) -> Unit,
+    onUpdateSystemPrompt: (String, String?) -> Unit,
     onToggleWebSearch: () -> Unit,
     onToggleFavorite: (ChatMessageEntity) -> Unit,
     backgroundIntensity: String = "soft",
@@ -331,6 +332,19 @@ fun ChatScreen(
             }
         }
 
+        val currentModelInfo = remember(uiState.selectedModel, uiState.modelList) {
+            uiState.modelList.firstOrNull { it.name == uiState.selectedModel }
+        }
+        val modelSupportsWebSearch = remember(currentModelInfo) {
+            if (currentModelInfo != null) {
+                detectNativeWebSearchSupport(
+                    modelName = currentModelInfo.name,
+                    providerName = currentModelInfo.provider,
+                    baseUrl = currentModelInfo.baseUrl
+                ).supported
+            } else false
+        }
+
         ChatInputBar(
             value = uiState.input,
             isSending = uiState.isSending,
@@ -351,6 +365,7 @@ fun ChatScreen(
             supportsFile = uiState.supportsFile,
             hasVisionConfig = uiState.hasVisionConfig,
             selectedModel = uiState.selectedModel,
+            modelSupportsWebSearch = modelSupportsWebSearch,
             onOpenModelPicker = { showModelPicker = true },
             onToggleWebSearch = onToggleWebSearch,
             modifier = Modifier
@@ -507,6 +522,7 @@ private fun MessageBubble(
     var editDialogOpen by remember { mutableStateOf(false) }
     var editValue by remember(message.id) { mutableStateOf(message.content) }
     var expanded by remember(message.id) { mutableStateOf(false) }
+    val haptic = LocalHapticFeedback.current
     val sanitizedContent = remember(message.content) {
         if (isUser) message.content else stripInnerThought(message.content)
     }
@@ -626,7 +642,10 @@ private fun MessageBubble(
                                             }
                                         }
                                         IconButton(
-                                            onClick = { menuExpanded = true },
+                                            onClick = {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                menuExpanded = true
+                                            },
                                             modifier = Modifier.size(28.dp)
                                         ) {
                                             Icon(
@@ -1382,13 +1401,14 @@ private fun ChatInputBar(
     onSaveAttachmentImage: (String) -> Unit,
     currentConversation: ConversationEntity?,
     defaultModel: String,
-    onUpdateConversationParameters: (String?, Float, Float, Int, Int) -> Unit,
-    onUpdateSystemPrompt: (String) -> Unit,
+    onUpdateConversationParameters: (String?, Float, Float, Int, Int, String?) -> Unit,
+    onUpdateSystemPrompt: (String, String?) -> Unit,
     webSearchEnabled: Boolean,
     supportsImage: Boolean,
     supportsFile: Boolean,
     hasVisionConfig: Boolean,
     selectedModel: String = "",
+    modelSupportsWebSearch: Boolean = false,
     onOpenModelPicker: () -> Unit = {},
     onToggleWebSearch: () -> Unit,
     modifier: Modifier = Modifier
@@ -1528,11 +1548,28 @@ private fun ChatInputBar(
                     }
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = if (webSearchEnabled) "联网中" else "离线",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (webSearchEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                // 模型联网能力指示灯
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = if (modelSupportsWebSearch) Color(0xFF16A34A).copy(alpha = 0.15f) else Color(0xFF9CA3AF).copy(alpha = 0.12f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (modelSupportsWebSearch) Color(0xFF16A34A) else Color(0xFF9CA3AF),
+                            modifier = Modifier.size(7.dp)
+                        ) {}
+                        Text(
+                            if (modelSupportsWebSearch) "联网" else "离线",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (modelSupportsWebSearch) Color(0xFF15803D) else Color(0xFF6B7280)
+                        )
+                    }
+                }
             }
             Text(
                 text = capabilityHint,
@@ -1767,7 +1804,8 @@ private fun ChatInputBar(
                             temperature,
                             topP,
                             maxTokensText.toIntOrNull() ?: 4096,
-                            contextLimit
+                            contextLimit,
+                            currentConversation?.id
                         )
                         showParameters = false
                     },
@@ -1803,7 +1841,7 @@ private fun ChatInputBar(
                     }
                     Button(
                         onClick = {
-                            onUpdateSystemPrompt(systemPromptText)
+                            onUpdateSystemPrompt(systemPromptText, currentConversation?.id)
                             showSystemPromptEditor = false
                         },
                         modifier = Modifier.weight(1f)

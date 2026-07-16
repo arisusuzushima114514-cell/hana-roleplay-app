@@ -11,6 +11,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.FlowRow
@@ -56,11 +57,14 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.Wallpaper
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -74,6 +78,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -117,6 +122,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.drawscope.Fill
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.layout.heightIn
+import coil.compose.AsyncImage
 import com.hana.app.R
 import com.hana.app.data.db.entity.CharacterCardEntity
 import com.hana.app.data.db.entity.ChatMessageEntity
@@ -151,8 +159,8 @@ fun CharacterChatScreen(
     onEditMessage: (ChatMessageEntity, String) -> Unit,
     onStopGeneration: () -> Unit,
     onRetryLastUserMessage: () -> Unit,
-    onUpdateConversationParameters: (String?, Float, Float, Int, Int) -> Unit,
-    onUpdateSystemPrompt: (String) -> Unit,
+    onUpdateConversationParameters: (String?, Float, Float, Int, Int, String?) -> Unit,
+    onUpdateSystemPrompt: (String, String?) -> Unit,
     onToggleWebSearch: () -> Unit,
     onClearHistory: (String) -> Unit,
     onDeleteLastRound: (String) -> Unit,
@@ -171,7 +179,13 @@ fun CharacterChatScreen(
     onClearBackground: () -> Unit,
     getCharacterById: (String) -> CharacterCardEntity?,
     getConversationByCharacterId: (String) -> ConversationEntity?,
-    errorFlow: kotlinx.coroutines.flow.SharedFlow<String>? = null
+    errorFlow: kotlinx.coroutines.flow.SharedFlow<String>? = null,
+    onGenerateSceneImage: ((String) -> Unit)? = null,
+    // 场景捕捉状态（由外部管理）
+    isGeneratingScene: Boolean = false,
+    sceneImageUrls: List<String> = emptyList(),
+    sceneImageError: String? = null,
+    onDismissSceneImage: () -> Unit = {}
 ) {
     val liveCharacter = getCharacterById(character.id) ?: character
     val bubbleColors = LocalHanaBubbleColors.current
@@ -201,6 +215,25 @@ fun CharacterChatScreen(
                     add(ChatMessageEntity(id = Long.MIN_VALUE, conversationId = conversationId, role = "assistant", speakerCharacterId = it.speakerCharacterId, speakerName = it.speakerName ?: liveCharacter.name, content = it.content, thinkingContent = null, thinkingDuration = null, timestamp = System.currentTimeMillis()))
                 }
             }
+            // 场景捕捉：生成中的加载提示
+            if (isGeneratingScene) {
+                add(ChatMessageEntity(
+                    id = -997L, conversationId = conversationId, role = "system",
+                    speakerCharacterId = liveCharacter.id, speakerName = liveCharacter.name,
+                    content = "🎨 正在生成场景图...", thinkingContent = null,
+                    thinkingDuration = null, timestamp = System.currentTimeMillis()
+                ))
+            }
+            // 场景捕捉：生成结果
+            sceneImageUrls.firstOrNull()?.let { url ->
+                add(ChatMessageEntity(
+                    id = -998L, conversationId = conversationId, role = "system",
+                    speakerCharacterId = liveCharacter.id, speakerName = liveCharacter.name,
+                    content = url, // 用 content 传递图片URL，渲染时特殊处理
+                    thinkingContent = null, thinkingDuration = null,
+                    timestamp = System.currentTimeMillis()
+                ))
+            }
         }.distinctBy { it.id }
     } catch (e: Exception) {
         emptyList()
@@ -208,10 +241,17 @@ fun CharacterChatScreen(
 
     val listState = rememberLazyListState()
     var inputBarHeightPx by remember { mutableStateOf(0) }
-    val bottomAnchorIndex = messages.size
+    val bottomAnchorIndex = maxOf(0, messages.size - 1)
     val density = LocalDensity.current
     val bottomContentPadding = with(density) { inputBarHeightPx.toDp() } + 24.dp
     LaunchedEffect(messages.size, uiState.streamingAssistant != null) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(bottomAnchorIndex)
+        }
+    }
+
+    // 首次进入角色卡时滚到底部
+    LaunchedEffect(Unit) {
         if (messages.isNotEmpty()) {
             listState.scrollToItem(bottomAnchorIndex)
         }
@@ -220,7 +260,7 @@ fun CharacterChatScreen(
     LaunchedEffect(uiState.isSending) {
         while (uiState.isSending) {
             if (messages.isNotEmpty() && listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index == bottomAnchorIndex) {
-                listState.scrollToItem(bottomAnchorIndex)
+                listState.animateScrollToItem(bottomAnchorIndex)
             }
             delay(450)
         }
@@ -275,7 +315,9 @@ fun CharacterChatScreen(
             conversation = conversation,
             uiState = uiState,
             onDismiss = { showParameters = false },
-            onUpdateParameters = onUpdateConversationParameters,
+            onUpdateParameters = { model, temp, topP, maxTokens, ctxLimit ->
+                onUpdateConversationParameters(model, temp, topP, maxTokens, ctxLimit, conversation.id)
+            },
             onEditSystemPrompt = {
                 showParameters = false
                 showSystemPrompt = true
@@ -308,7 +350,7 @@ fun CharacterChatScreen(
                     TextButton(onClick = { showSystemPrompt = false }) { Text("取消") }
                     Button(
                         onClick = {
-                            onUpdateSystemPrompt(promptText)
+                            onUpdateSystemPrompt(promptText, conversation.id)
                             showSystemPrompt = false
                         },
                         modifier = Modifier.weight(1f)
@@ -444,10 +486,28 @@ fun CharacterChatScreen(
                                         },
                                         leadingIcon = { Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = null) }
                                     )
+                                    if (onGenerateSceneImage != null) {
+                                        DropdownMenuItem(
+                                            text = { Text("场景捕捉（测试）") },
+                                            onClick = {
+                                                moreMenuExpanded = false
+                                                if (isGeneratingScene) return@DropdownMenuItem
+                                                val prompt = buildSceneImagePrompt(liveCharacter, messages)
+                                                onGenerateSceneImage(prompt)
+                                            },
+                                            leadingIcon = { Icon(Icons.Filled.CameraAlt, contentDescription = null) },
+                                            enabled = !isGeneratingScene
+                                        )
+                                    }
                                 }
                             }
                         }
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            AssistChip(
+                                onClick = { showSettingsSheet = true },
+                                label = { Text("模型设定") },
+                                leadingIcon = { Icon(Icons.Filled.Settings, null, modifier = Modifier.size(16.dp)) }
+                            )
                             AssistChip(
                                 onClick = {
                                     showSettingsSheet = true
@@ -634,29 +694,93 @@ fun CharacterChatScreen(
                     items(messages, key = { it.id }) { message ->
                         val isStreaming = message.id == Long.MIN_VALUE
                         val isGreeting = message.id == -1L && message.role == "assistant"
-                        AnimatedVisibility(
-                            visible = true,
-                            enter = fadeIn(animationSpec = tween(300)) +
-                                slideInVertically(animationSpec = tween(300)) { 30 }
-                        ) {
-                            CharacterMessageBubble(
-                                message = message,
-                                thinkingContent = if (isStreaming) {
-                                    uiState.streamingAssistant?.thinkingContent.orEmpty()
-                                } else {
-                                    message.thinkingContent.orEmpty()
-                                },
-                                thinkingDuration = if (isStreaming) null else message.thinkingDuration,
-                                streamingStartAt = if (isStreaming) uiState.streamingAssistant?.startedAt else null,
-                                maxWidth = maxBubbleWidth,
-                                bubbleColors = bubbleColors,
-                                showInnerThoughtEntry = showInnerThoughtEntry,
-                                onDeleteMessage = if (isGreeting) null else onDeleteMessage,
-                                onRegenerateMessage = if (isGreeting) null else onRegenerateMessage,
-                                onEditMessage = if (isGreeting) null else onEditMessage,
-                                onRetryLastUserMessage = onRetryLastUserMessage,
-                                snackbarHostState = snackbarHostState
-                            )
+                        val isSceneImage = message.id == -998L
+                        val isSceneLoading = message.id == -997L
+
+                        if (isSceneImage) {
+                            // 场景捕捉结果：显示图片
+                            AnimatedVisibility(
+                                visible = true,
+                                enter = fadeIn(animationSpec = tween(500)) + scaleIn()
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                                    horizontalAlignment = Alignment.Start
+                                ) {
+                                    Text(
+                                        "${liveCharacter.name} 此刻的画面",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(bottom = 6.dp, start = 4.dp)
+                                    )
+                                    Card(
+                                        shape = RoundedCornerShape(16.dp),
+                                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                                    ) {
+                                        AsyncImage(
+                                            model = message.content,
+                                            contentDescription = "场景图",
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .heightIn(max = 400.dp),
+                                            contentScale = ContentScale.Fit
+                                        )
+                                    }
+                                }
+                            }
+                        } else if (isSceneLoading) {
+                            // 场景捕捉：生成中
+                            AnimatedVisibility(
+                                visible = true,
+                                enter = fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { 30 }
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        "正在生成 ${liveCharacter.name} 的场景图...",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        } else {
+                            AnimatedVisibility(
+                                visible = true,
+                                enter = fadeIn(animationSpec = tween(300)) +
+                                    slideInVertically(animationSpec = tween(300)) { 30 }
+                            ) {
+                                CharacterMessageBubble(
+                                    message = message,
+                                    thinkingContent = if (isStreaming) {
+                                        uiState.streamingAssistant?.thinkingContent.orEmpty()
+                                    } else {
+                                        message.thinkingContent.orEmpty()
+                                    },
+                                    thinkingDuration = if (isStreaming) null else message.thinkingDuration,
+                                    streamingStartAt = if (isStreaming) uiState.streamingAssistant?.startedAt else null,
+                                    maxWidth = maxBubbleWidth,
+                                    bubbleColors = bubbleColors,
+                                    showInnerThoughtEntry = showInnerThoughtEntry,
+                                    onDeleteMessage = if (isGreeting) null else onDeleteMessage,
+                                    onRegenerateMessage = if (isGreeting) null else onRegenerateMessage,
+                                    onEditMessage = if (isGreeting) null else onEditMessage,
+                                    onRetryLastUserMessage = onRetryLastUserMessage,
+                                    snackbarHostState = snackbarHostState
+                                )
+                            }
                         }
                     }
                     item(key = "character-bottom-anchor") {
@@ -672,7 +796,6 @@ fun CharacterChatScreen(
                 onValueChange = onInputChange,
                 onSend = onSend,
                 onStop = onStopGeneration,
-                onModelSettings = { showSettingsSheet = true },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .onGloballyPositioned { inputBarHeightPx = it.size.height }
@@ -925,6 +1048,14 @@ fun CharacterChatScreen(
             logs = getCharacterStoryLogs(liveCharacter.id),
             onDismiss = { showStorylineSheet = false }
         )
+    }
+
+    // 场景捕捉错误通过 Snackbar 显示
+    LaunchedEffect(sceneImageError) {
+        sceneImageError?.let { error ->
+            snackbarHostState.showSnackbar(message = "场景生图失败: $error", duration = SnackbarDuration.Short)
+            onDismissSceneImage()
+        }
     }
 
 }
@@ -1602,7 +1733,6 @@ private fun CharacterChatInputBar(
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
-    onModelSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val actionScale by animateFloatAsState(
@@ -1612,69 +1742,58 @@ private fun CharacterChatInputBar(
     )
 
     Surface(
-        shadowElevation = 10.dp,
-        shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp, bottomStart = 0.dp, bottomEnd = 0.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+        shadowElevation = 6.dp,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 0.dp, bottomEnd = 0.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
                 .imePadding()
-                .padding(horizontal = 14.dp, vertical = 12.dp)
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .graphicsLayer {
+                    scaleX = actionScale
+                    scaleY = actionScale
+                },
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Surface(
-                    onClick = onModelSettings,
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.68f)
-                ) {
-                    Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("角色模型设定", style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            }
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                placeholder = { Text("回复 ${characterName}...") },
+                enabled = !isSending,
+                maxLines = 5,
+                minLines = 1,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(24.dp)
+            )
             Spacer(modifier = Modifier.size(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = value,
-                    onValueChange = onValueChange,
-                    placeholder = { Text("回复 ${characterName}...") },
-                    enabled = !isSending,
-                    maxLines = 5,
-                    minLines = 1,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(24.dp)
-                )
-                Spacer(modifier = Modifier.size(10.dp))
-                if (isSending) {
-                    IconButton(
-                        onClick = onStop,
-                        modifier = Modifier.size(44.dp).graphicsLayer {
-                            scaleX = actionScale
-                            scaleY = actionScale
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.error)
-                    ) {
-                        Icon(Icons.Filled.Stop, contentDescription = "停止", tint = MaterialTheme.colorScheme.onError)
-                    }
-                } else {
-                    IconButton(
-                        onClick = onSend,
-                        enabled = value.isNotBlank(),
-                        modifier = Modifier.size(44.dp).graphicsLayer {
-                            scaleX = actionScale
-                            scaleY = actionScale
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.primary)
-                    ) {
-                        SmoothCharacterTriangleIcon(color = MaterialTheme.colorScheme.onPrimary)
-                    }
+            if (isSending) {
+                IconButton(
+                    onClick = onStop,
+                    modifier = Modifier.size(40.dp).graphicsLayer {
+                        scaleX = actionScale
+                        scaleY = actionScale
+                    },
+                    colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Icon(Icons.Filled.Stop, contentDescription = "停止", tint = MaterialTheme.colorScheme.onError)
+                }
+            } else {
+                IconButton(
+                    onClick = onSend,
+                    enabled = value.isNotBlank(),
+                    modifier = Modifier.size(40.dp).graphicsLayer {
+                        scaleX = actionScale
+                        scaleY = actionScale
+                    },
+                    colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    SmoothCharacterTriangleIcon(color = MaterialTheme.colorScheme.onPrimary)
                 }
             }
         }
@@ -1796,5 +1915,71 @@ private fun ParametersBottomSheet(
                 Text("保存参数")
             }
         }
+    }
+}
+
+/**
+ * 构建场景捕捉生图提示词
+ * 从角色卡信息 + 最近对话中提取场景，生成POV视角的英文提示词
+ * 核心思路：让AI"看到"你此刻眼中的角色，而不是凭空画一个角色
+ */
+private fun buildSceneImagePrompt(character: CharacterCardEntity, messages: List<ChatMessageEntity>): String {
+    val name = character.name.ifBlank { "character" }
+
+    // 1. 提取角色外观——尽可能完整保留角色卡的人设描述
+    val appearance = character.description
+        .take(600)
+        .ifBlank { character.greeting.take(300) }
+        .ifBlank { "anime style character" }
+
+    // 2. 从最近对话中提取「此刻正在发生什么」
+    val recentMessages = messages.takeLast(4)
+    val lastUserMsg = recentMessages.lastOrNull { it.role == "user" }?.content?.take(200).orEmpty()
+    val lastAssistantMsg = recentMessages.lastOrNull { it.role == "assistant" }?.content?.take(200).orEmpty()
+
+    // 3. 提取角色当前的情绪/动作关键词
+    val emotionKeywords = listOf(
+        "害羞", "脸红", "微笑", "笑", "开心", "温柔", "担心", "难过", "生气",
+        "靠在", "躺在", "坐在", "抱着", "牵着", "看着", "靠近", "依偎", "撒娇",
+        "blush", "smile", "shy", "gentle", "tender", "happy", "worried", "leaning",
+        "lying on", "sitting", "holding", "looking at", "cuddling", "embracing"
+    )
+    val actionCues = buildString {
+        for (keyword in emotionKeywords) {
+            if (lastAssistantMsg.contains(keyword, ignoreCase = true)) {
+                append("$keyword, ")
+            }
+        }
+    }.trimEnd(',', ' ')
+
+    // 4. 拼接最终提示词——POV视角 + 外观 + 当前场景 + 情绪
+    return buildString {
+        // POV 视角——明确告诉AI这是第一人称视角
+        append("(masterpiece, best quality), ")
+        append("POV shot, first-person perspective. ")
+        append("You are looking at $name. ")
+
+        // 角色外观——从角色卡继承
+        append("$name looks exactly like this: $appearance. ")
+
+        // 当前场景——从对话中提取
+        if (lastUserMsg.isNotBlank() || lastAssistantMsg.isNotBlank()) {
+            append("Current scene: ")
+            if (lastUserMsg.isNotBlank()) {
+                append("you and $name are interacting, $lastUserMsg. ")
+            }
+            if (lastAssistantMsg.isNotBlank()) {
+                append("$name's response: $lastAssistantMsg. ")
+            }
+        }
+
+        // 情绪动作——从对话中提取的标签
+        if (actionCues.isNotBlank()) {
+            append("$name is showing these emotions: $actionCues. ")
+        }
+
+        // 风格和质量
+        append("Anime art style, soft cel shading, detailed eyes, beautiful lighting, ")
+        append("cinematic composition, depth of field, from above POV angle.")
     }
 }

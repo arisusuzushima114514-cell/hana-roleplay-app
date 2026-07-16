@@ -3,7 +3,7 @@ package com.hana.app
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
-import androidx.activity.ComponentActivity
+import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -87,7 +87,7 @@ private data class AutoThemeSuggestion(
     val tag: String
 )
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
     private val appContainer by lazy { AppContainer(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -197,6 +197,9 @@ private fun WorkspaceApp(appContainer: AppContainer) {
         var backgroundSourceChoices by remember { mutableStateOf<List<PendingBackgroundSelection>>(emptyList()) }
         var showBackgroundLibrary by remember { mutableStateOf(false) }
         var renamingBackground by remember { mutableStateOf<SavedBackgroundInfo?>(null) }
+        var sceneGeneratedUrls by remember { mutableStateOf<List<String>>(emptyList()) }
+        var sceneGenError by remember { mutableStateOf<String?>(null) }
+        var isGeneratingScene by remember { mutableStateOf(false) }
         var lastBackPressedAt by rememberSaveable { mutableStateOf(0L) }
         val editingCharacter = uiState.characters.firstOrNull { it.id == editingCharacterId }
         val selectedCharacterForChat = uiState.characters.firstOrNull { it.id == selectedCharacterIdForChat }
@@ -375,6 +378,13 @@ private fun WorkspaceApp(appContainer: AppContainer) {
             onDismiss = { renamingBackground = null }
         )
 
+        // 切换角色时清除场景捕捉残留状态
+        LaunchedEffect(selectedCharacterForChat?.id) {
+            sceneGeneratedUrls = emptyList()
+            sceneGenError = null
+            isGeneratingScene = false
+        }
+
         if (selectedCharacterForChat != null) {
             CharacterChatScreen(
                 character = selectedCharacterForChat,
@@ -425,7 +435,27 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 getConversationByCharacterId = { characterId ->
                     uiState.conversations.firstOrNull { it.characterId == characterId }
                 },
-                errorFlow = chatViewModel.errorFlow
+                errorFlow = chatViewModel.errorFlow,
+                onGenerateSceneImage = { prompt ->
+                    isGeneratingScene = true
+                    sceneGeneratedUrls = emptyList()
+                    sceneGenError = null
+                    imageGenerationViewModel.generateSceneImage(prompt) { urls, error ->
+                        isGeneratingScene = false
+                        if (urls.isNotEmpty()) {
+                            sceneGeneratedUrls = urls
+                        } else {
+                            sceneGenError = error
+                        }
+                    }
+                },
+                isGeneratingScene = isGeneratingScene,
+                sceneImageUrls = sceneGeneratedUrls,
+                sceneImageError = sceneGenError,
+                onDismissSceneImage = {
+                    sceneGeneratedUrls = emptyList()
+                    sceneGenError = null
+                }
             )
         } else {
             Scaffold(

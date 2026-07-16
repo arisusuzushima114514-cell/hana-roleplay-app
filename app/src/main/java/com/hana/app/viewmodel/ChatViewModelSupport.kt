@@ -74,7 +74,8 @@ internal fun multimodalModelKeywords(): List<String> = MULTIMODAL_MODEL_KEYWORDS
 internal fun toolCapableModelKeywords(): List<String> = TOOL_CAPABLE_MODEL_KEYWORDS
 
 fun extractThinking(text: String): ThinkingExtraction {
-    val regex = Regex("<think>(.*?)</think>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    // 仅匹配独立成行的  思考块，避免误匹配正文中的 thinking/response 单词
+    val regex = Regex("""(?:^|\n)\s*thinking\s*\n(.*?)\n\s*response(?:\s*$|\n)""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
     val thinking = regex.findAll(text).joinToString("\n\n") { it.groupValues[1].trim() }
     val content = text.replace(regex, "").trim()
     return ThinkingExtraction(content = content, thinking = thinking)
@@ -84,7 +85,7 @@ fun buildCharacterSystemPrompt(character: CharacterCardEntity?, state: Character
     if (character == null) return DEFAULT_CHINO_PROMPT
     return buildString {
         // --- 核心格式指令（放最前面，防止被长文本挤出注意力窗口）---
-        append("【输出格式】先输出角色说出口的话与动作；需要内心时，在回复末尾用 <inner>...</inner> 包裹。")
+        append("【输出格式】先输出角色说出口的话与动作；每轮回复末尾必须用 <inner>...</inner> 包裹角色的内心真实想法，禁止省略内心。")
         append("\n<inner> 保持1-2句，写具体情绪、身体反应或心口不一，禁止写成机械分析或元叙事。")
         append("\n不要把内心混进正文台词。")
         append("\n\n")

@@ -77,6 +77,7 @@ import java.util.UUID
 private const val DEFAULT_CONVERSATION_TITLE = "新对话"
 private const val CHARACTER_STORY_REBUILD_VERSION = 3
 
+@androidx.compose.runtime.Stable
 data class StreamingAssistantState(
     val speakerCharacterId: String? = null,
     val speakerName: String? = null,
@@ -92,6 +93,7 @@ private data class GroupReplyCandidate(
     val score: Int
 )
 
+@androidx.compose.runtime.Stable
 data class ChatUiState(
     val conversations: List<ConversationEntity> = emptyList(),
     val currentConversationId: String? = null,
@@ -1169,19 +1171,20 @@ class ChatViewModel(
         temperature: Float,
         topP: Float,
         maxTokens: Int,
-        contextLimit: Int
+        contextLimit: Int,
+        conversationId: String? = null
     ) {
-        val conversationId = _uiState.value.currentConversationId ?: return
+        val id = conversationId ?: _uiState.value.currentConversationId ?: return
         viewModelScope.launch {
-            val conversation = conversationRepository.getById(conversationId) ?: return@launch
+            val conversation = conversationRepository.getById(id) ?: return@launch
             conversationRepository.updateParameters(conversation, modelName, temperature, topP, maxTokens, contextLimit)
         }
     }
 
-    fun updateSystemPrompt(systemPrompt: String) {
-        val conversationId = _uiState.value.currentConversationId ?: return
+    fun updateSystemPrompt(systemPrompt: String, conversationId: String? = null) {
+        val id = conversationId ?: _uiState.value.currentConversationId ?: return
         viewModelScope.launch {
-            val conversation = conversationRepository.getById(conversationId) ?: return@launch
+            val conversation = conversationRepository.getById(id) ?: return@launch
             conversationRepository.updateSystemPrompt(conversation, systemPrompt)
         }
     }
@@ -1748,7 +1751,7 @@ class ChatViewModel(
                 if (cleanContent.isBlank()) {
                     _error.emit(
                         if (cleanThinking.isNotBlank()) {
-                            "模型只返回了思考内容，没有正式回答。请重试或切换模型/关闭流式输出。"
+                            "模型只返回了思考内容，没有正式回答。请重试或切换模型/关闭实时打字。"
                         } else {
                             "AI 未返回有效回复，请重试"
                         }
@@ -1781,10 +1784,9 @@ class ChatViewModel(
                         autoNameConversation(updatedConversation, userText, assistantText)
                     }
                     updatedConversation.characterId?.let { characterId ->
-                        val totalRounds = minOf(
-                            messageRepository.getMessages(conversationId).count { it.role == "user" },
-                            messageRepository.getMessages(conversationId).count { it.role == "assistant" }
-                        )
+                        val userRounds = messageRepository.countByRole(conversationId, "user")
+                        val assistantRounds = messageRepository.countByRole(conversationId, "assistant")
+                        val totalRounds = minOf(userRounds, assistantRounds)
                         val progress = advanceCharacterStoryState(
                             previous = getCharacterStoryState(characterId),
                             userText = userText,
@@ -1975,23 +1977,37 @@ class ChatViewModel(
                 .takeIf { it.isNotBlank() }
         } else null
         val enhancedPrompt = buildString {
+            // 全局偏好设定 - 仅对主对话生效，不影响角色卡
+            // Persona 作为最高优先级的身份层，所有AI对话必须经过这一层过滤
             if (conversation?.characterId == null && _uiState.value.personaEnabled && _uiState.value.personaPrompt.isNotBlank()) {
-                append("[角色模式] ")
+                append("【你的身份设定 - 你用这个角色的语气、性格和口吻与用户对话】\n")
                 append(_uiState.value.personaPrompt)
-                append("\n\n---\n\n")
+                append("\n\n【回答原则 - 必须遵守】\n")
+                append("1. 你必须认真回答用户的所有问题，不能因为角色设定就敷衍、省略或拒绝回答。\n")
+                append("2. 角色性格只影响你说话的语气和方式（如傲娇、吃醋、毒舌），但不影响你完整输出信息。\n")
+                append("3. 即使角色设定是\"不情愿\"或\"高冷\"，也必须输出完整有用的内容，只是用角色的口吻来表达。\n")
+                append("4. 对事实、知识、推荐、技术等任何问题，都要给出实质性回答，不要用角色设定当借口跳过。")
+                append("\n\n[").append(timeInfo).append("]")
+            } else {
+                append(systemPrompt)
+                append("\n\n[").append(timeInfo).append("]")
             }
-            append(systemPrompt)
-            append("\n\n[").append(timeInfo).append("]")
             // 角色对话中跳过模型版本声明（节省token且角色不需要知道自己是AI）
-            if (conversation?.characterId == null && effectiveModel != null && effectiveModel.isNotBlank()) {
+            // 主对话中如果启用了Persona，也跳过，避免覆盖人格设定
+            if (conversation?.characterId == null && _uiState.value.personaEnabled.not() && effectiveModel != null && effectiveModel.isNotBlank()) {
                 append("\n你的模型版本: $effectiveModel")
                 append("\n当用户询问你是哪个模型/哪个AI/哪个版本时，请如实回答你是 $effectiveModel。")
             }
             append("\n当用户询问日期、时间、星期几时，请根据上述系统时间直接回答，不要说无法获取实时信息。")
             if (!memoryBlock.isNullOrBlank()) {
-                append("\n\n【主助手长期记忆】\n")
+                val personaActive = _uiState.value.personaEnabled && _uiState.value.personaPrompt.isNotBlank()
+                if (personaActive) {
+                    append("\n\n【关于用户你已知的信息——请自然融入对话，用你的角色性格去回应这些信息，不要像读数据库一样逐条复述】\n")
+                } else {
+                    append("\n\n【关于用户的信息】\n")
+                }
                 append(memoryBlock)
-                append("\n【记忆结束】")
+                append("\n【信息结束】")
             }
             if (webSearchEnabled) {
                 append("\n联网搜索已启用。")
@@ -2409,7 +2425,7 @@ class ChatViewModel(
 
     private suspend fun refreshConversationLastMessage(conversationId: String) {
         val conversation = conversationRepository.getById(conversationId) ?: return
-        val latestMessage = messageRepository.getMessages(conversationId).lastOrNull()
+        val latestMessage = messageRepository.getLastMessage(conversationId)
         val preview = latestMessage?.let { msg ->
             val decoded = decodeChatContent(msg.content)
             decoded.text.ifBlank { decoded.attachments.firstOrNull()?.name ?: "" }.take(200)
