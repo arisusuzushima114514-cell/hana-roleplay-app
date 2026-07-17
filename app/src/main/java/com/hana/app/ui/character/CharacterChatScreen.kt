@@ -70,6 +70,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -244,19 +245,15 @@ fun CharacterChatScreen(
     val bottomAnchorIndex = maxOf(0, messages.size - 1)
     val density = LocalDensity.current
     val bottomContentPadding = with(density) { inputBarHeightPx.toDp() } + 24.dp
-    LaunchedEffect(messages.size, uiState.streamingAssistant != null) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(bottomAnchorIndex)
-        }
-    }
 
-    // 首次进入角色卡时滚到底部
-    LaunchedEffect(Unit) {
+    // 进入角色卡 / 新消息到达时，瞬间滚到底部（不用动画，避免长对话"超绝大滑动"）
+    LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
             listState.scrollToItem(bottomAnchorIndex)
         }
     }
 
+    // 流式输出进行中：仅在用户已在底部时，动画跟随新内容
     LaunchedEffect(uiState.isSending) {
         while (uiState.isSending) {
             if (messages.isNotEmpty() && listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index == bottomAnchorIndex) {
@@ -408,128 +405,121 @@ fun CharacterChatScreen(
 
     Scaffold(
         topBar = {
-            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
-                Surface(
-                    shape = RoundedCornerShape(24.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-                    tonalElevation = 2.dp,
-                    modifier = Modifier.fillMaxWidth()
+            Surface(
+                shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                tonalElevation = 2.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = onBack) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                            }
-                            Spacer(modifier = Modifier.width(4.dp))
-                        Box(
-                            modifier = Modifier
-                                .size(42.dp)
-                                .clip(CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                                if (liveCharacter.avatarUrl.isNotBlank()) {
-                                    CharacterAvatar(avatarUrl = liveCharacter.avatarUrl, modifier = Modifier.size(42.dp))
-                                } else {
-                                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(42.dp)) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Text(liveCharacter.name.take(1), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                        }
-                                    }
-                                }
-                            }
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(liveCharacter.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                                Text(stringResource(R.string.character_chat_subtitle), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Button(
-                                    onClick = { showStorylineSheet = true },
-                                    shape = RoundedCornerShape(999.dp),
-                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                        contentColor = MaterialTheme.colorScheme.primary
-                                    )
-                                ) {
-                                    Icon(
-                                        Icons.Filled.AutoAwesome,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "角色主线",
-                                        style = MaterialTheme.typography.labelLarge,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-                            }
-                            Box {
-                                IconButton(onClick = { moreMenuExpanded = true }) {
-                                    Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.character_more))
-                                }
-                                DropdownMenu(expanded = moreMenuExpanded, onDismissRequest = { moreMenuExpanded = false }) {
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.character_regenerate)) },
-                                        onClick = {
-                                            moreMenuExpanded = false
-                                            val lastAssistant = messages.firstOrNull { it.role == "assistant" && it.id > 0L && it.id != Long.MIN_VALUE }
-                                            if (lastAssistant != null) onRegenerateMessage(lastAssistant) else onRetryLastUserMessage()
-                                        },
-                                        leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.character_retract_last)) },
-                                        onClick = {
-                                            moreMenuExpanded = false
-                                            onDeleteLastRound(conversationId)
-                                        },
-                                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = null) }
-                                    )
-                                    if (onGenerateSceneImage != null) {
-                                        DropdownMenuItem(
-                                            text = { Text("场景捕捉（测试）") },
-                                            onClick = {
-                                                moreMenuExpanded = false
-                                                if (isGeneratingScene) return@DropdownMenuItem
-                                                val prompt = buildSceneImagePrompt(liveCharacter, messages)
-                                                onGenerateSceneImage(prompt)
-                                            },
-                                            leadingIcon = { Icon(Icons.Filled.CameraAlt, contentDescription = null) },
-                                            enabled = !isGeneratingScene
-                                        )
-                                    }
+                    IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                    Box(
+                        modifier = Modifier.size(38.dp).clip(CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (liveCharacter.avatarUrl.isNotBlank()) {
+                            CharacterAvatar(avatarUrl = liveCharacter.avatarUrl, modifier = Modifier.size(38.dp))
+                        } else {
+                            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(38.dp)) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(liveCharacter.name.take(1), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
                                 }
                             }
                         }
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            AssistChip(
-                                onClick = { showSettingsSheet = true },
-                                label = { Text("模型设定") },
-                                leadingIcon = { Icon(Icons.Filled.Settings, null, modifier = Modifier.size(16.dp)) }
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    // 名字 + 角色主线（紧凑排列）
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(liveCharacter.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                        Button(
+                            onClick = { showStorylineSheet = true },
+                            shape = RoundedCornerShape(999.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.primary
                             )
-                            AssistChip(
+                        ) {
+                            Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("角色主线", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                    // 三点菜单（收纳所有功能）
+                    Box {
+                        IconButton(onClick = { moreMenuExpanded = true }, modifier = Modifier.size(40.dp)) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.character_more))
+                        }
+                        DropdownMenu(expanded = moreMenuExpanded, onDismissRequest = { moreMenuExpanded = false }) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.character_regenerate)) },
                                 onClick = {
-                                    showSettingsSheet = true
+                                    moreMenuExpanded = false
+                                    val lastAssistant = messages.firstOrNull { it.role == "assistant" && it.id > 0L && it.id != Long.MIN_VALUE }
+                                    if (lastAssistant != null) onRegenerateMessage(lastAssistant) else onRetryLastUserMessage()
                                 },
-                                label = {
-                                    Text(creativePresetModeLabel)
+                                leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.character_retract_last)) },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    onDeleteLastRound(conversationId)
                                 },
-                                leadingIcon = {
-                                    Icon(Icons.Filled.AutoAwesome, null, modifier = Modifier.size(16.dp))
-                                }
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = null) }
                             )
-                            AssistChip(onClick = onToggleWebSearch, label = { Text(if (uiState.webSearchEnabled) stringResource(R.string.character_search_on) else stringResource(R.string.character_search_off)) })
-                            AssistChip(onClick = { showSettingsSheet = true }, label = { Text(stringResource(R.string.character_panel)) })
-                            AssistChip(
-                                onClick = onOpenBackgroundLibrary,
-                                label = { Text("背景库") },
-                                leadingIcon = { Icon(Icons.Filled.Wallpaper, null, modifier = Modifier.size(16.dp)) }
+                            if (onGenerateSceneImage != null) {
+                                DropdownMenuItem(
+                                    text = { Text("场景捕捉") },
+                                    onClick = {
+                                        moreMenuExpanded = false
+                                        if (isGeneratingScene) return@DropdownMenuItem
+                                        val prompt = buildSceneImagePrompt(liveCharacter, messages)
+                                        onGenerateSceneImage(prompt)
+                                    },
+                                    leadingIcon = { Icon(Icons.Filled.CameraAlt, contentDescription = null) },
+                                    enabled = !isGeneratingScene
+                                )
+                            }
+                            HorizontalDivider()
+                            DropdownMenuItem(
+                                text = { Text("模型设定") },
+                                onClick = { moreMenuExpanded = false; showSettingsSheet = true },
+                                leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) }
                             )
-                            AssistChip(
-                                onClick = onPickBackground,
-                                label = { Text(stringResource(R.string.character_bg)) },
-                                leadingIcon = { Icon(Icons.Filled.Wallpaper, null, modifier = Modifier.size(16.dp)) }
+                            DropdownMenuItem(
+                                text = { Text(creativePresetModeLabel) },
+                                onClick = { moreMenuExpanded = false; showSettingsSheet = true },
+                                leadingIcon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (uiState.webSearchEnabled) "联网：开" else "联网：关") },
+                                onClick = { moreMenuExpanded = false; onToggleWebSearch() },
+                                leadingIcon = { Icon(Icons.Filled.Public, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("面板") },
+                                onClick = { moreMenuExpanded = false; showSettingsSheet = true },
+                                leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("背景库") },
+                                onClick = { moreMenuExpanded = false; onOpenBackgroundLibrary() },
+                                leadingIcon = { Icon(Icons.Filled.Wallpaper, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("背景") },
+                                onClick = { moreMenuExpanded = false; onPickBackground() },
+                                leadingIcon = { Icon(Icons.Filled.Wallpaper, contentDescription = null) }
                             )
                         }
                     }
@@ -542,6 +532,7 @@ fun CharacterChatScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .imePadding()
         ) {
             val maxBubbleWidth = maxWidth * 0.85f
 
@@ -757,12 +748,7 @@ fun CharacterChatScreen(
                                 }
                             }
                         } else {
-                            AnimatedVisibility(
-                                visible = true,
-                                enter = fadeIn(animationSpec = tween(300)) +
-                                    slideInVertically(animationSpec = tween(300)) { 30 }
-                            ) {
-                                CharacterMessageBubble(
+                            CharacterMessageBubble(
                                     message = message,
                                     thinkingContent = if (isStreaming) {
                                         uiState.streamingAssistant?.thinkingContent.orEmpty()
@@ -779,8 +765,7 @@ fun CharacterChatScreen(
                                     onEditMessage = if (isGreeting) null else onEditMessage,
                                     onRetryLastUserMessage = onRetryLastUserMessage,
                                     snackbarHostState = snackbarHostState
-                                )
-                            }
+                            )
                         }
                     }
                     item(key = "character-bottom-anchor") {
@@ -1742,19 +1727,17 @@ private fun CharacterChatInputBar(
     )
 
     Surface(
-        shadowElevation = 6.dp,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 0.dp, bottomEnd = 0.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+        shadowElevation = 4.dp,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 0.dp, bottomEnd = 0.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .imePadding()
-                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .padding(horizontal = 8.dp, vertical = 6.dp)
                 .graphicsLayer {
                     scaleX = actionScale
                     scaleY = actionScale
@@ -1836,6 +1819,7 @@ private fun ParametersBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(20.dp)
                 .padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -1888,8 +1872,7 @@ private fun ParametersBottomSheet(
             Slider(
                 value = contextLimit.toFloat(),
                 onValueChange = { contextLimit = it.toInt().coerceIn(1, 999) },
-                valueRange = 1f..999f,
-                steps = 997
+                valueRange = 1f..999f
             )
             Button(
                 onClick = onEditSystemPrompt,
@@ -1904,7 +1887,7 @@ private fun ParametersBottomSheet(
                         modelValue,
                         temperature,
                         topP,
-                        maxTokensText.toIntOrNull() ?: 4096,
+                        maxTokensText.toIntOrNull() ?: 8192,
                         contextLimit
                     )
                     onDismiss()

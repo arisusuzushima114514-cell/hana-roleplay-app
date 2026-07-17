@@ -1042,6 +1042,8 @@ class ChatViewModel(
                 conversationRepository.delete(conversation.id)
             }
             characterRepository.delete(character)
+            // 清除残留的好感度状态和日志
+            settingsRepository.clearCharacterStoryState(character.id)
         }
     }
 
@@ -1066,6 +1068,12 @@ class ChatViewModel(
                 conversationRepository.updateLastMessage(conversation, null)
             }
             conversationRepository.rename(conversation, "新对话", isNamed = false)
+            // 重置好感度到初始状态，清除旧日志
+            if (character != null) {
+                settingsRepository.clearCharacterStoryState(characterId)
+                val initialState = deriveInitialCharacterStoryState(character)
+                settingsRepository.saveCharacterStoryState(characterId, initialState)
+            }
         }
     }
 
@@ -1126,30 +1134,37 @@ class ChatViewModel(
         activeReplyJob?.cancel()
         activeReplyJob = null
         viewModelScope.launch {
-            val conversationId = _uiState.value.currentConversationId ?: return@launch
-            val conversation = conversationRepository.getById(conversationId) ?: return@launch
-            val streaming = _uiState.value.streamingAssistant ?: return@launch
-            val text = streaming.content.ifBlank { "已停止生成" }
-            val thinkingDuration = (((streaming.firstContentAt ?: System.currentTimeMillis()) - streaming.startedAt) / 1000L)
-                .toInt()
-                .coerceAtLeast(0)
-            messageRepository.insert(
-                ChatMessageEntity(
-                    conversationId = conversationId,
-                    role = "assistant",
-                    speakerCharacterId = streaming.speakerCharacterId,
-                    speakerName = streaming.speakerName,
-                    content = text,
-                    thinkingContent = streaming.thinkingContent.ifBlank { null },
-                    thinkingDuration = if (streaming.thinkingContent.isBlank()) null else thinkingDuration,
-                    timestamp = System.currentTimeMillis()
-                )
-            )
-            conversationRepository.updateLastMessage(conversation, text)
-            if (conversation.characterId != null) {
-                characterRepository.updateLastMessage(conversation.characterId, text)
+            try {
+                val conversationId = _uiState.value.currentConversationId
+                val conversation = if (conversationId != null) conversationRepository.getById(conversationId) else null
+                val streaming = _uiState.value.streamingAssistant
+                if (conversation != null && streaming != null) {
+                    val text = streaming.content.ifBlank { "已停止生成" }
+                    val thinkingDuration = (((streaming.firstContentAt ?: System.currentTimeMillis()) - streaming.startedAt) / 1000L)
+                        .toInt()
+                        .coerceAtLeast(0)
+                    messageRepository.insert(
+                        ChatMessageEntity(
+                            conversationId = conversation.id,
+                            role = "assistant",
+                            speakerCharacterId = streaming.speakerCharacterId,
+                            speakerName = streaming.speakerName,
+                            content = text,
+                            thinkingContent = streaming.thinkingContent.ifBlank { null },
+                            thinkingDuration = if (streaming.thinkingContent.isBlank()) null else thinkingDuration,
+                            timestamp = System.currentTimeMillis()
+                        )
+                    )
+                    conversationRepository.updateLastMessage(conversation, text)
+                    if (conversation.characterId != null) {
+                        characterRepository.updateLastMessage(conversation.characterId, text)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("ChatVM", "stopGeneration save failed", e)
+            } finally {
+                _uiState.update { it.copy(isSending = false, streamingAssistant = null) }
             }
-            _uiState.update { it.copy(isSending = false, streamingAssistant = null) }
         }
     }
 
@@ -1178,6 +1193,13 @@ class ChatViewModel(
         viewModelScope.launch {
             val conversation = conversationRepository.getById(id) ?: return@launch
             conversationRepository.updateParameters(conversation, modelName, temperature, topP, maxTokens, contextLimit)
+            // 保存后立即同步 UI 状态，避免 Room Flow 延迟导致面板重开时显示旧值
+            val updated = conversationRepository.getById(id) ?: return@launch
+            _uiState.update { state ->
+                state.copy(
+                    conversations = state.conversations.map { if (it.id == updated.id) updated else it }
+                )
+            }
         }
     }
 
@@ -1724,6 +1746,7 @@ class ChatViewModel(
         }
 
         if (streamResult.exceptionOrNull() is CancellationException) {
+            _uiState.update { it.copy(isSending = false, streamingAssistant = null) }
             return
         }
 
@@ -2027,10 +2050,44 @@ class ChatViewModel(
             .filter { it.role != "system" }
             .takeLast(conversation?.contextLimit ?: 999)
 
+        // 上下文压缩：超过30轮（60条消息）时，保留最近30轮完整内容，旧消息压缩为摘要
+        val MAX_FULL_CONTEXT_MSGS = 60
+        val (olderMessages, recentMessages) = if (contextHistory.size > MAX_FULL_CONTEXT_MSGS) {
+            val splitIndex = contextHistory.size - MAX_FULL_CONTEXT_MSGS
+            contextHistory.take(splitIndex) to contextHistory.drop(splitIndex)
+        } else {
+            emptyList<ChatMessageEntity>() to contextHistory
+        }
+
+        // 角色锚点：每5轮注入一次角色提醒，防止长对话中system prompt被截断后角色失忆
+        // 传入完整历史消息，用于从对话开头提取高质量风格样本
+        val characterAnchor = if (conversation?.characterId != null) {
+            buildCharacterAnchor(conversation.characterId, recentMessages, history)
+        } else null
+
         return buildList {
             add(ApiService.ChatPayload(role = "system", text = enhancedPrompt))
-            contextHistory.forEach { message ->
+            // 注入旧对话摘要，让模型知道历史脉络
+            if (olderMessages.isNotEmpty()) {
+                val summary = buildContextSummary(olderMessages)
+                if (summary.isNotBlank()) {
+                    add(ApiService.ChatPayload(role = "system", text = summary))
+                }
+            }
+            var roundCount = 0
+            val lastIdx = recentMessages.lastIndex
+            recentMessages.forEachIndexed { index, message ->
                 if (message.role != "system") {
+                    // 每5轮对话注入一次角色锚点（作为system消息，不影响对话流）
+                    if (roundCount > 0 && roundCount % 5 == 0 && characterAnchor != null) {
+                        add(ApiService.ChatPayload(role = "system", text = characterAnchor))
+                    }
+                    // 在最后一条用户消息前强制注入锚点：确保角色卡身份始终在模型注意力窗口内
+                    // 这是根治"人机化"的关键——无论对话多长，模型在生成回复前一定能看到角色身份
+                    if (index == lastIdx && message.role == "user" && characterAnchor != null) {
+                        add(ApiService.ChatPayload(role = "system", text = characterAnchor))
+                    }
+                    roundCount++
                     val decoded = decodeChatContent(message.content)
                     val imageData: List<String> = if (supportsVisionForRequest) {
                         decoded.attachments.filter { it.kind == AttachmentKind.IMAGE }.mapNotNull { attachmentService.asImageDataUrl(it) }
@@ -2053,6 +2110,132 @@ class ChatViewModel(
                     ))
                 }
             }
+        }
+    }
+
+    /**
+     * 构建角色锚点：每次回复前强制注入，确保角色身份+风格+内心想法始终在模型注意力窗口内。
+     * 风格样本从对话开头提取（质量最高），避免被后期人机化回复污染。
+     */
+    private suspend fun buildCharacterAnchor(
+        characterId: String,
+        recentMessages: List<ChatMessageEntity>,
+        allHistory: List<ChatMessageEntity>
+    ): String {
+        val character = characterRepository.getById(characterId) ?: return ""
+        val state = try {
+            settingsRepository.getSettings().characterStoryStates[characterId]
+        } catch (e: Exception) { null }
+        // 从对话开头提取高质量风格样本（前8条角色回复，每条取400字）
+        // 对话开头是角色还没退化时的回复，风格最纯正，不会被后期人机化污染
+        val earlyStyleSamples = allHistory
+            .filter { it.role == "assistant" && it.speakerCharacterId == characterId }
+            .take(8)
+            .mapNotNull { msg ->
+                val text = msg.content.trim().take(400)
+                if (text.isNotBlank()) "「$text」" else null
+            }
+        // 如果对话开头样本不足，用最近回复补充
+        val styleSamples = if (earlyStyleSamples.size >= 5) {
+            earlyStyleSamples
+        } else {
+            (earlyStyleSamples + recentMessages
+                .filter { it.role == "assistant" && it.speakerCharacterId == characterId }
+                .takeLast(5)
+                .mapNotNull { msg ->
+                    val text = msg.content.trim().take(400)
+                    if (text.isNotBlank()) "「$text」" else null
+                }).take(8)
+        }
+        // greeting 作为风格样本（取500字，充分展示角色语气）
+        val greetingSample = character.greeting.trim().take(500)
+            .takeIf { it.isNotBlank() }
+            ?.let { "「$it」" }
+        // 提取最近角色内心想法作为示例
+        val innerThoughtSample = recentMessages
+            .filter { it.role == "assistant" && it.speakerCharacterId == characterId && !it.thinkingContent.isNullOrBlank() }
+            .takeLast(1)
+            .mapNotNull { msg ->
+                val thinking = msg.thinkingContent!!.trim().take(80)
+                if (thinking.isNotBlank()) "<inner>${thinking}...</inner>" else null
+            }
+            .firstOrNull()
+
+        return buildString {
+            // ===== 第1部分：内心想法指令（放在最前面，确保不被忽略） =====
+            append("【强制要求·内心想法】")
+            append("你的每一条回复末尾，必须包含<inner>...</inner>标签，写出${character.name}此刻的真实内心想法。")
+            append("内心想法要精炼，一两句话即可，但要精准戳中角色此刻最真实的那一个念头——")
+            append("是心动、是后悔、是窃喜、是心疼，挑最要命的那一个写。")
+            append("不要写流水账，不要复述已经发生的事，只写角色嘴上没说但心里最在意的那个点。")
+            append("这是强制格式，不能省略、不能敷衍、不能用\"（内心：...）\"等其他格式替代。")
+            if (innerThoughtSample != null) {
+                append("示例格式：$innerThoughtSample")
+            }
+            append("如果本轮回复没有内心想法，这轮回复无效。")
+
+            // ===== 第2部分：角色身份 =====
+            append("【角色身份】你是${character.name}")
+            if (character.userPersona.isNotBlank()) {
+                append("。性格：${character.userPersona.take(200)}")
+            }
+            if (character.description.isNotBlank()) {
+                append("。背景：${character.description.take(250)}")
+            }
+            if (state != null) {
+                append("。当前好感度${state.affection}，信任度${state.trust}，关系阶段：${state.relationshipAnchor}。")
+                append("你的回复应体现这个关系阶段应有的亲密度和语气。")
+            }
+
+            // ===== 第3部分：风格样本 =====
+            val samples = listOfNotNull(greetingSample) + styleSamples
+            if (samples.isNotEmpty()) {
+                append("【你的说话风格·必须模仿】以下是你的角色开场白和对话开头的回复片段，这是你最纯正的风格，请严格模仿：")
+                append(samples.distinct().joinToString(" "))
+                append("你的写作风格应该是：生动、细腻、充满身体细节和情感描写，像小说一样有画面感。")
+                append("用动作、表情、环境、内心活动来传递情绪，而不是直接说\"我很开心\"或\"我很难过\"。")
+            }
+
+            // ===== 第4部分：行为约束 =====
+            append("【禁止事项】")
+            append("1. 禁止使用\"作为AI\"\"根据设定\"\"用户\"\"你问我答\"等出戏表述。")
+            append("2. 禁止说教、总结对话、评价对话本身。")
+            append("3. 禁止跳出角色以第三人称描述自己。")
+            append("4. 禁止用省略号或短句敷衍——每一轮都要有完整的场景、动作、对话和情感。")
+        }
+    }
+
+    /**
+     * 构建历史对话摘要：当上下文超过20轮时，将旧对话压缩为摘要，
+     * 让模型知道历史脉络，同时节省token给最近对话。
+     */
+    private fun buildContextSummary(messages: List<ChatMessageEntity>): String {
+        if (messages.isEmpty()) return ""
+        val userMsgs = messages.filter { it.role == "user" }
+        val assistantMsgs = messages.filter { it.role == "assistant" }
+        if (userMsgs.isEmpty()) return ""
+        return buildString {
+            append("【历史对话摘要·共约${messages.size / 2}轮】")
+            append("\n以下是之前对话中用户提到的主要话题和事件，请记住这些上下文：")
+            // 取最近10条用户消息作为摘要锚点
+            userMsgs.takeLast(10).forEach { msg ->
+                val text = decodeChatContent(msg.content).text.trim().take(80)
+                if (text.isNotBlank()) {
+                    append("\n- $text")
+                }
+            }
+            // 加入角色回复的关键信息
+            val lastAssistantMsgs = assistantMsgs.takeLast(5)
+            if (lastAssistantMsgs.isNotEmpty()) {
+                append("\n角色最近的回应要点：")
+                lastAssistantMsgs.forEach { msg ->
+                    val text = msg.content.trim().take(60)
+                    if (text.isNotBlank()) {
+                        append("\n- $text")
+                    }
+                }
+            }
+            append("\n【摘要结束·以下为最近对话，请以角色身份自然延续】")
         }
     }
 

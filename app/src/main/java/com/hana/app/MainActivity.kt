@@ -48,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hana.app.BuildConfig
 import com.hana.app.core.AppContainer
 import com.hana.app.data.settings.SettingsRepository
 import com.hana.app.manager.BackgroundTarget
@@ -58,6 +59,7 @@ import com.hana.app.ui.character.CharacterEditScreen
 import com.hana.app.ui.character.CharacterListScreen
 import com.hana.app.ui.character.StoryCreateScreen
 import com.hana.app.ui.chat.ChatScreenWithDrawer
+import com.hana.app.ui.components.UpdateChangelogDialog
 import com.hana.app.ui.settings.SettingsScreen
 import com.hana.app.ui.theme.HanaTheme
 import com.hana.app.ui.theme.ThemeMode
@@ -824,8 +826,80 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 }
             )
         }
+
+        // ===== 版本更新日志弹窗 =====
+        var showChangelog by remember { mutableStateOf(false) }
+        var hasShownThisSession by remember { mutableStateOf(false) }
+        val settingsRepo = remember { SettingsRepository(context) }
+        val currentVersion = BuildConfig.VERSION_NAME
+
+        LaunchedEffect(Unit) {
+            settingsRepo.getLastSeenChangelogVersion().collect { seen ->
+                if (!hasShownThisSession && seen != currentVersion && currentVersion.isNotBlank()) {
+                    showChangelog = true
+                    hasShownThisSession = true
+                }
+            }
+        }
+
+        if (showChangelog) {
+            UpdateChangelogDialog(
+                versionName = currentVersion,
+                changelog = CHANGELOG_V1_7_4,
+                onDismiss = { showChangelog = false },
+                onDontShowAgain = { dontShow ->
+                    appScope.launch {
+                        if (dontShow) {
+                            settingsRepo.markChangelogSeen(currentVersion)
+                        }
+                    }
+                }
+            )
+        }
     }
 }
+
+/**
+ * v1.7.4 更新内容，供弹窗显示。
+ */
+private val CHANGELOG_V1_7_4 = """
+### 长对话防退化（重要）
+
+- 每次回复前强制注入角色卡锚点，确保角色身份始终在模型注意力窗口内
+- 锚点包含角色身份、风格样本、内心想法示例和禁止事项
+- 上下文压缩：超过30轮自动摘要旧对话，保留最近30轮完整内容
+- 不再出现40轮后角色失忆变人机的问题
+
+### 内心想法强化
+
+- 内心想法指令前置到锚点最前面，不再被忽略
+- 提取角色真实内心想法作为格式示例
+- 精炼指令：要精不要长，一两句话戳中核心
+
+### 风格样本大幅增强
+
+- 从对话开头提取高质量回复作为风格参照（前8条，每条400字）
+- 额外注入角色开场白作为风格样本（500字）
+- 避免人机化回复污染风格，保持角色一致性
+
+### 角色对话界面精简
+
+- 顶部栏精简为单行，冗余功能收入三点菜单
+- 底部输入栏紧凑化，缩小圆角和阴影
+- 键盘弹出时对话区域不再被挤压，可正常阅读
+
+### 多机型适配
+
+- 参数面板支持垂直滚动，小屏不裁切按钮
+- Slider 流畅度优化，低端设备不卡顿
+- 上下文轮数范围统一为 1~999
+
+### 其他优化
+
+- 默认最大回复长度 4096 → 8192 tokens
+- 参数保存后即时同步 UI，不显示旧值
+- 深色模式配色优化
+- 新增版本更新推送弹窗，每次更新自动展示""".trimIndent()
 
 private fun currentAutoThemeSuggestion(now: Calendar = Calendar.getInstance()): AutoThemeSuggestion? {
     val hour = now.get(Calendar.HOUR_OF_DAY)

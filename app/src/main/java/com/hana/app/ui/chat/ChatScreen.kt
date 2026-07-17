@@ -1428,7 +1428,7 @@ private fun ChatInputBar(
         mutableStateOf(currentConversation?.topP ?: 1f)
     }
     var maxTokensText by remember(currentConversation?.id, currentConversation?.maxTokens) {
-        mutableStateOf((currentConversation?.maxTokens ?: 4096).toString())
+        mutableStateOf((currentConversation?.maxTokens ?: 8192).toString())
     }
     var contextLimit by remember(currentConversation?.id, currentConversation?.contextLimit) {
         mutableStateOf(currentConversation?.contextLimit ?: 999)
@@ -1736,7 +1736,9 @@ private fun ChatInputBar(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(20.dp),
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp)
+                    .padding(bottom = 32.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Text("对话参数设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -1787,8 +1789,7 @@ private fun ChatInputBar(
                 Slider(
                     value = contextLimit.toFloat(),
                     onValueChange = { contextLimit = it.toInt().coerceIn(1, 999) },
-                    valueRange = 1f..50f,
-                    steps = 48
+                    valueRange = 1f..999f
                 )
                 Button(
                     onClick = { showSystemPromptEditor = true },
@@ -1803,7 +1804,7 @@ private fun ChatInputBar(
                             modelValue,
                             temperature,
                             topP,
-                            maxTokensText.toIntOrNull() ?: 4096,
+                            maxTokensText.toIntOrNull() ?: 8192,
                             contextLimit,
                             currentConversation?.id
                         )

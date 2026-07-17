@@ -23,6 +23,7 @@ private fun normalizeSecret(value: String): String = value.trim().trim('"', '\''
 
 val DEFAULT_QUICK_PHRASES = listOf("继续", "更详细", "换个方式", "总结")
 
+@androidx.compose.runtime.Stable
 data class SettingsData(
     val apiBaseUrl: String = DEFAULT_API_BASE_URL,
     val apiKey: String = "",
@@ -58,6 +59,7 @@ data class SettingsData(
     val characterStoryLogs: Map<String, List<CharacterStoryLogEntry>> = emptyMap()
 )
 
+@androidx.compose.runtime.Stable
 data class CharacterStoryState(
     val affection: Int = 0,
     val trust: Int = 0,
@@ -71,6 +73,7 @@ data class CharacterStoryState(
     val baselineMessageTimestamp: Long = 0L
 )
 
+@androidx.compose.runtime.Stable
 data class CharacterStoryLogEntry(
     val id: String,
     val timestamp: Long,
@@ -84,6 +87,9 @@ data class CharacterStoryLogEntry(
 class SettingsRepository(context: Context) {
     private val appContext = context.applicationContext
     private val dataStore: DataStore<Preferences> = companionDataStore(appContext)
+
+    @Volatile
+    private var cachedSettings: SettingsData = SettingsData()
 
     val settingsFlow: Flow<SettingsData> = dataStore.data
         .catch { e ->
@@ -128,22 +134,18 @@ class SettingsRepository(context: Context) {
             characterStoryStateMigrationVersion = preferences[KEY_CHARACTER_STORY_STATE_MIGRATION_VERSION] ?: 0,
             characterStoryStates = parseCharacterStoryStates(preferences[KEY_CHARACTER_STORY_STATES].orEmpty()),
             characterStoryLogs = parseCharacterStoryLogs(preferences[KEY_CHARACTER_STORY_LOGS].orEmpty())
-        )
+        ).also { cachedSettings = it }
         } catch (e: Exception) {
             Log.e("SettingsRepo", "Parse preferences failed, using defaults", e)
-            SettingsData()
+            SettingsData().also { cachedSettings = it }
         }
     }
 
     val languageFlow: Flow<String> = settingsFlow.map { it.language }
 
+    /** 获取缓存的 settings，避免每次调用都走 DataStore 的 first() */
     suspend fun getSettings(): SettingsData {
-        return try {
-            settingsFlow.first()
-        } catch (e: Exception) {
-            Log.e("SettingsRepo", "getSettings failed", e)
-            SettingsData()
-        }
+        return cachedSettings
     }
 
     suspend fun getApiSettings(): ApiSettings {
@@ -372,11 +374,34 @@ class SettingsRepository(context: Context) {
         } catch (e: Exception) { Log.e("SettingsRepo", "saveCharacterStoryStateMigrationVersion", e) }
     }
 
+    suspend fun clearCharacterStoryState(characterId: String) {
+        try {
+            dataStore.edit { p ->
+                val states = parseCharacterStoryStates(p[KEY_CHARACTER_STORY_STATES].orEmpty()).toMutableMap()
+                states.remove(characterId)
+                p[KEY_CHARACTER_STORY_STATES] = serializeCharacterStoryStates(states)
+
+                val logs = parseCharacterStoryLogs(p[KEY_CHARACTER_STORY_LOGS].orEmpty()).toMutableMap()
+                logs.remove(characterId)
+                p[KEY_CHARACTER_STORY_LOGS] = serializeCharacterStoryLogs(logs)
+            }
+        } catch (e: Exception) { Log.e("SettingsRepo", "clearCharacterStoryState", e) }
+    }
+
     suspend fun addHistoricalTokens(tokens: Int) {
         if (tokens <= 0) return
         dataStore.edit { preferences ->
             preferences[KEY_HISTORICAL_TOKENS] = (preferences[KEY_HISTORICAL_TOKENS] ?: 0L) + tokens
         }
+    }
+
+    /** 获取用户上次已查看过的更新日志版本号 */
+    fun getLastSeenChangelogVersion(): kotlinx.coroutines.flow.Flow<String> =
+        dataStore.data.map { it[KEY_LAST_SEEN_CHANGELOG_VERSION] ?: "" }
+
+    /** 记录用户已查看当前版本的更新日志，下次不再弹出 */
+    suspend fun markChangelogSeen(version: String) {
+        dataStore.edit { it[KEY_LAST_SEEN_CHANGELOG_VERSION] = version }
     }
 
     suspend fun saveAll(
@@ -437,6 +462,7 @@ class SettingsRepository(context: Context) {
         private val KEY_CHARACTER_STORY_STATE_MIGRATION_VERSION = intPreferencesKey("character_story_state_migration_version")
         private val KEY_CHARACTER_STORY_STATES = stringPreferencesKey("character_story_states")
         private val KEY_CHARACTER_STORY_LOGS = stringPreferencesKey("character_story_logs")
+        private val KEY_LAST_SEEN_CHANGELOG_VERSION = stringPreferencesKey("last_seen_changelog_version")
 
         private fun parseCharacterStoryStates(raw: String): Map<String, CharacterStoryState> {
             if (raw.isBlank()) return emptyMap()
