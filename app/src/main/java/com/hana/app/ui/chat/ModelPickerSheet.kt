@@ -181,13 +181,30 @@ fun ModelPickerSheet(
                                         Text(model.name, style = MaterialTheme.typography.bodyMedium, fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                                             model.capabilities.forEach { Text(it.emoji, fontSize = 12.sp) }
-                                            Text(
-                                                if (webSearchSupport.supported) "支持原生联网搜索" else "不支持联网",
-                                                color = if (webSearchSupport.supported) Color(0xFF15803D) else Color(0xFFB91C1C),
-                                                fontSize = 11.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
+                                            // 联网能力指示灯
+                                            Surface(
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = if (webSearchSupport.supported) Color(0xFF16A34A).copy(alpha = 0.15f) else Color(0xFF9CA3AF).copy(alpha = 0.12f),
+                                                modifier = Modifier.padding(vertical = 1.dp)
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Surface(
+                                                        shape = RoundedCornerShape(50),
+                                                        color = if (webSearchSupport.supported) Color(0xFF16A34A) else Color(0xFF9CA3AF),
+                                                        modifier = Modifier.size(7.dp)
+                                                    ) {}
+                                                    Text(
+                                                        if (webSearchSupport.supported) "联网" else "离线",
+                                                        fontSize = 11.sp,
+                                                        color = if (webSearchSupport.supported) Color(0xFF15803D) else Color(0xFF6B7280),
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                     Spacer(Modifier.width(4.dp))

@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "conversations")
+@androidx.compose.runtime.Stable
 data class ConversationEntity(
     @PrimaryKey val id: String,
     val title: String,
@@ -19,7 +20,7 @@ data class ConversationEntity(
     val modelName: String? = null,
     val temperature: Float = 0.7f,
     val topP: Float = 1.0f,
-    val maxTokens: Int = 4096,
+    val maxTokens: Int = 8192,
     val contextLimit: Int = 36,
     val systemPrompt: String? = null,
     val totalTokens: Int = 0,

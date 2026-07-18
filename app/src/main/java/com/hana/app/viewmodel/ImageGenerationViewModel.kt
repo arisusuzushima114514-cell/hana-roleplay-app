@@ -350,4 +350,56 @@ class ImageGenerationViewModel(
             _events.emit("已把结果图设为新的参考图")
         }
     }
+
+    /**
+     * 场景捕捉生图：根据角色+对话上下文生成场景图
+     * @param promptEn 英文提示词
+     * @param onResult 回调：(imageUrls, errorMessage)
+     */
+    fun generateSceneImage(promptEn: String, onResult: (List<String>, String?) -> Unit) {
+        viewModelScope.launch {
+            val settings = settingsRepository.getSettings()
+            val provider = if (settings.imageProviderId > 0L && settings.imageModelName.isNotBlank()) {
+                modelRepository.getById(settings.imageProviderId)
+            } else {
+                modelRepository.getActive()
+            }
+            if (provider == null) {
+                onResult(emptyList(), "没有可用的生图服务商，请先去 API 管理里配置")
+                return@launch
+            }
+            val modelName = settings.imageModelName.ifBlank { settings.selectedModel }
+            if (modelName.isBlank()) {
+                onResult(emptyList(), "没有可用的生图模型，请先设置生图模型")
+                return@launch
+            }
+
+            val finalPrompt = applyCreativePresetToImagePrompt(
+                prompt = promptEn,
+                creativePreset = settings.creativePresetText,
+                enabled = settings.creativePresetText.isNotBlank()
+            )
+
+            imageGenerationService.generate(
+                provider = provider,
+                requestData = ImageGenerationRequest(
+                    prompt = finalPrompt,
+                    negativePrompt = "nsfw, low quality, blurry, distorted, bad anatomy, extra fingers, watermark",
+                    model = modelName,
+                    batchCount = 1,
+                    aspectRatio = "3:4"
+                )
+            ).onSuccess { result ->
+                val displayUrls = result.imageUrls.mapNotNull { url ->
+                    attachmentService.persistGeneratedImage(
+                        url = url,
+                        fallbackName = "scene_${System.currentTimeMillis()}"
+                    )?.uri ?: url.takeIf { it.isNotBlank() }
+                }
+                onResult(displayUrls, null)
+            }.onFailure { throwable ->
+                onResult(emptyList(), throwable.message.orEmpty().ifBlank { "生图失败" })
+            }
+        }
+    }
 }

@@ -1,5 +1,5 @@
-val appVersionName = findProperty("APP_VERSION_NAME")?.toString() ?: "1.7.0"
-val appVersionCode = findProperty("APP_VERSION_CODE")?.toString()?.toIntOrNull() ?: 9
+val appVersionName = findProperty("APP_VERSION_NAME")?.toString() ?: "1.7.4"
+val appVersionCode = findProperty("APP_VERSION_CODE")?.toString()?.toIntOrNull() ?: 11
 
 plugins {
     id("com.android.application")
@@ -9,13 +9,10 @@ plugins {
 
 android {
 
+    buildFeatures {
+        buildConfig = true
+    }
 
-
-
-
-
-
-    
     namespace = "com.hana.app"
     compileSdk = 35
 

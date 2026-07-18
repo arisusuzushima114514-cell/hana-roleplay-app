@@ -10,6 +10,7 @@ import android.graphics.Shader
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.lifecycle.ViewModel
@@ -76,6 +77,7 @@ import java.util.UUID
 private const val DEFAULT_CONVERSATION_TITLE = "新对话"
 private const val CHARACTER_STORY_REBUILD_VERSION = 3
 
+@androidx.compose.runtime.Stable
 data class StreamingAssistantState(
     val speakerCharacterId: String? = null,
     val speakerName: String? = null,
@@ -91,6 +93,7 @@ private data class GroupReplyCandidate(
     val score: Int
 )
 
+@androidx.compose.runtime.Stable
 data class ChatUiState(
     val conversations: List<ConversationEntity> = emptyList(),
     val currentConversationId: String? = null,
@@ -487,7 +490,12 @@ class ChatViewModel(
                     put(MediaStore.Downloads.MIME_TYPE, "text/markdown")
                     put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 }
-                val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("创建文件失败")
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("创建文件失败")
+                } else {
+                    val file = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName)
+                    android.net.Uri.fromFile(file)
+                }
                 context.contentResolver.openOutputStream(uri)?.use { it.write(body.toByteArray(Charsets.UTF_8)) }
                 fileName
             }.onSuccess { onResult(true, it) }
@@ -502,6 +510,16 @@ class ChatViewModel(
                     ?.use { it.readBytes() }
                     ?: error("无法读取所选文件")
                 val character = characterRepository.importCharacterCardBytes(bytes)
+                // PNG角色卡：将PNG图片保存为本地头像，解决导入后头像空白的问题
+                val isPng = bytes.size >= 8 && bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte()
+                        && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
+                if (isPng && character.avatarUrl.isBlank()) {
+                    val avatarDir = java.io.File(context.filesDir, "characters")
+                    avatarDir.mkdirs()
+                    val avatarFile = java.io.File(avatarDir, "${character.id}.png")
+                    avatarFile.writeBytes(bytes)
+                    characterRepository.save(character.copy(avatarUrl = avatarFile.absolutePath))
+                }
                 character.name
             }.onSuccess { onResult(true, "已导入角色卡：$it") }
                 .onFailure { onResult(false, it.message.orEmpty()) }
@@ -754,7 +772,12 @@ class ChatViewModel(
                     put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 }
                 val resolver = context.contentResolver
-                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("无法创建备份文件")
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("无法创建备份文件")
+                } else {
+                    val file = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName)
+                    android.net.Uri.fromFile(file)
+                }
                 resolver.openOutputStream(uri)?.use { it.write(payload.toByteArray(Charsets.UTF_8)) } ?: error("无法写入备份文件")
                 fileName
             }.onSuccess { onResult(true, it) }
@@ -940,8 +963,13 @@ class ChatViewModel(
                     put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 }
                 val resolver = context.contentResolver
-                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                    ?: error("Cannot create export file")
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        ?: error("Cannot create export file")
+                } else {
+                    val file = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName)
+                    android.net.Uri.fromFile(file)
+                }
                 resolver.openOutputStream(uri)?.use { output ->
                     output.write(body.toByteArray(Charsets.UTF_8))
                 } ?: error("Cannot open export file")
@@ -1024,6 +1052,8 @@ class ChatViewModel(
                 conversationRepository.delete(conversation.id)
             }
             characterRepository.delete(character)
+            // 清除残留的好感度状态和日志
+            settingsRepository.clearCharacterStoryState(character.id)
         }
     }
 
@@ -1048,6 +1078,12 @@ class ChatViewModel(
                 conversationRepository.updateLastMessage(conversation, null)
             }
             conversationRepository.rename(conversation, "新对话", isNamed = false)
+            // 重置好感度到初始状态，清除旧日志
+            if (character != null) {
+                settingsRepository.clearCharacterStoryState(characterId)
+                val initialState = deriveInitialCharacterStoryState(character)
+                settingsRepository.saveCharacterStoryState(characterId, initialState)
+            }
         }
     }
 
@@ -1108,30 +1144,37 @@ class ChatViewModel(
         activeReplyJob?.cancel()
         activeReplyJob = null
         viewModelScope.launch {
-            val conversationId = _uiState.value.currentConversationId ?: return@launch
-            val conversation = conversationRepository.getById(conversationId) ?: return@launch
-            val streaming = _uiState.value.streamingAssistant ?: return@launch
-            val text = streaming.content.ifBlank { "已停止生成" }
-            val thinkingDuration = (((streaming.firstContentAt ?: System.currentTimeMillis()) - streaming.startedAt) / 1000L)
-                .toInt()
-                .coerceAtLeast(0)
-            messageRepository.insert(
-                ChatMessageEntity(
-                    conversationId = conversationId,
-                    role = "assistant",
-                    speakerCharacterId = streaming.speakerCharacterId,
-                    speakerName = streaming.speakerName,
-                    content = text,
-                    thinkingContent = streaming.thinkingContent.ifBlank { null },
-                    thinkingDuration = if (streaming.thinkingContent.isBlank()) null else thinkingDuration,
-                    timestamp = System.currentTimeMillis()
-                )
-            )
-            conversationRepository.updateLastMessage(conversation, text)
-            if (conversation.characterId != null) {
-                characterRepository.updateLastMessage(conversation.characterId, text)
+            try {
+                val conversationId = _uiState.value.currentConversationId
+                val conversation = if (conversationId != null) conversationRepository.getById(conversationId) else null
+                val streaming = _uiState.value.streamingAssistant
+                if (conversation != null && streaming != null) {
+                    val text = streaming.content.ifBlank { "已停止生成" }
+                    val thinkingDuration = (((streaming.firstContentAt ?: System.currentTimeMillis()) - streaming.startedAt) / 1000L)
+                        .toInt()
+                        .coerceAtLeast(0)
+                    messageRepository.insert(
+                        ChatMessageEntity(
+                            conversationId = conversation.id,
+                            role = "assistant",
+                            speakerCharacterId = streaming.speakerCharacterId,
+                            speakerName = streaming.speakerName,
+                            content = text,
+                            thinkingContent = streaming.thinkingContent.ifBlank { null },
+                            thinkingDuration = if (streaming.thinkingContent.isBlank()) null else thinkingDuration,
+                            timestamp = System.currentTimeMillis()
+                        )
+                    )
+                    conversationRepository.updateLastMessage(conversation, text)
+                    if (conversation.characterId != null) {
+                        characterRepository.updateLastMessage(conversation.characterId, text)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("ChatVM", "stopGeneration save failed", e)
+            } finally {
+                _uiState.update { it.copy(isSending = false, streamingAssistant = null) }
             }
-            _uiState.update { it.copy(isSending = false, streamingAssistant = null) }
         }
     }
 
@@ -1153,19 +1196,27 @@ class ChatViewModel(
         temperature: Float,
         topP: Float,
         maxTokens: Int,
-        contextLimit: Int
+        contextLimit: Int,
+        conversationId: String? = null
     ) {
-        val conversationId = _uiState.value.currentConversationId ?: return
+        val id = conversationId ?: _uiState.value.currentConversationId ?: return
         viewModelScope.launch {
-            val conversation = conversationRepository.getById(conversationId) ?: return@launch
+            val conversation = conversationRepository.getById(id) ?: return@launch
             conversationRepository.updateParameters(conversation, modelName, temperature, topP, maxTokens, contextLimit)
+            // 保存后立即同步 UI 状态，避免 Room Flow 延迟导致面板重开时显示旧值
+            val updated = conversationRepository.getById(id) ?: return@launch
+            _uiState.update { state ->
+                state.copy(
+                    conversations = state.conversations.map { if (it.id == updated.id) updated else it }
+                )
+            }
         }
     }
 
-    fun updateSystemPrompt(systemPrompt: String) {
-        val conversationId = _uiState.value.currentConversationId ?: return
+    fun updateSystemPrompt(systemPrompt: String, conversationId: String? = null) {
+        val id = conversationId ?: _uiState.value.currentConversationId ?: return
         viewModelScope.launch {
-            val conversation = conversationRepository.getById(conversationId) ?: return@launch
+            val conversation = conversationRepository.getById(id) ?: return@launch
             conversationRepository.updateSystemPrompt(conversation, systemPrompt)
         }
     }
@@ -1705,6 +1756,7 @@ class ChatViewModel(
         }
 
         if (streamResult.exceptionOrNull() is CancellationException) {
+            _uiState.update { it.copy(isSending = false, streamingAssistant = null) }
             return
         }
 
@@ -1732,7 +1784,7 @@ class ChatViewModel(
                 if (cleanContent.isBlank()) {
                     _error.emit(
                         if (cleanThinking.isNotBlank()) {
-                            "模型只返回了思考内容，没有正式回答。请重试或切换模型/关闭流式输出。"
+                            "模型只返回了思考内容，没有正式回答。请重试或切换模型/关闭实时打字。"
                         } else {
                             "AI 未返回有效回复，请重试"
                         }
@@ -1765,10 +1817,9 @@ class ChatViewModel(
                         autoNameConversation(updatedConversation, userText, assistantText)
                     }
                     updatedConversation.characterId?.let { characterId ->
-                        val totalRounds = minOf(
-                            messageRepository.getMessages(conversationId).count { it.role == "user" },
-                            messageRepository.getMessages(conversationId).count { it.role == "assistant" }
-                        )
+                        val userRounds = messageRepository.countByRole(conversationId, "user")
+                        val assistantRounds = messageRepository.countByRole(conversationId, "assistant")
+                        val totalRounds = minOf(userRounds, assistantRounds)
                         val progress = advanceCharacterStoryState(
                             previous = getCharacterStoryState(characterId),
                             userText = userText,
@@ -1941,7 +1992,7 @@ class ChatViewModel(
                 java.util.Calendar.SATURDAY -> "星期六"; else -> ""
             }
             append(dow).append(" ")
-            append(String.format("%02d:%02d", now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE)))
+            append(String.format(java.util.Locale.US, "%02d:%02d", now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE)))
         }
 
         val webSearchEnabled = _uiState.value.webSearchEnabled
@@ -1959,22 +2010,37 @@ class ChatViewModel(
                 .takeIf { it.isNotBlank() }
         } else null
         val enhancedPrompt = buildString {
+            // 全局偏好设定 - 仅对主对话生效，不影响角色卡
+            // Persona 作为最高优先级的身份层，所有AI对话必须经过这一层过滤
             if (conversation?.characterId == null && _uiState.value.personaEnabled && _uiState.value.personaPrompt.isNotBlank()) {
-                append("[角色模式] ")
+                append("【你的身份设定 - 你用这个角色的语气、性格和口吻与用户对话】\n")
                 append(_uiState.value.personaPrompt)
-                append("\n\n---\n\n")
+                append("\n\n【回答原则 - 必须遵守】\n")
+                append("1. 你必须认真回答用户的所有问题，不能因为角色设定就敷衍、省略或拒绝回答。\n")
+                append("2. 角色性格只影响你说话的语气和方式（如傲娇、吃醋、毒舌），但不影响你完整输出信息。\n")
+                append("3. 即使角色设定是\"不情愿\"或\"高冷\"，也必须输出完整有用的内容，只是用角色的口吻来表达。\n")
+                append("4. 对事实、知识、推荐、技术等任何问题，都要给出实质性回答，不要用角色设定当借口跳过。")
+                append("\n\n[").append(timeInfo).append("]")
+            } else {
+                append(systemPrompt)
+                append("\n\n[").append(timeInfo).append("]")
             }
-            append(systemPrompt)
-            append("\n\n[").append(timeInfo).append("]")
-            if (effectiveModel != null && effectiveModel.isNotBlank()) {
+            // 角色对话中跳过模型版本声明（节省token且角色不需要知道自己是AI）
+            // 主对话中如果启用了Persona，也跳过，避免覆盖人格设定
+            if (conversation?.characterId == null && _uiState.value.personaEnabled.not() && effectiveModel != null && effectiveModel.isNotBlank()) {
                 append("\n你的模型版本: $effectiveModel")
                 append("\n当用户询问你是哪个模型/哪个AI/哪个版本时，请如实回答你是 $effectiveModel。")
             }
             append("\n当用户询问日期、时间、星期几时，请根据上述系统时间直接回答，不要说无法获取实时信息。")
             if (!memoryBlock.isNullOrBlank()) {
-                append("\n\n【主助手长期记忆】\n")
+                val personaActive = _uiState.value.personaEnabled && _uiState.value.personaPrompt.isNotBlank()
+                if (personaActive) {
+                    append("\n\n【关于用户你已知的信息——请自然融入对话，用你的角色性格去回应这些信息，不要像读数据库一样逐条复述】\n")
+                } else {
+                    append("\n\n【关于用户的信息】\n")
+                }
                 append(memoryBlock)
-                append("\n【记忆结束】")
+                append("\n【信息结束】")
             }
             if (webSearchEnabled) {
                 append("\n联网搜索已启用。")
@@ -1994,15 +2060,53 @@ class ChatViewModel(
             .filter { it.role != "system" }
             .takeLast(conversation?.contextLimit ?: 999)
 
+        // 上下文压缩：超过10轮（20条消息）时，保留最近10轮完整内容，旧消息压缩为摘要
+        // 防止长对话token溢出，同时确保模型能看到最近的完整对话
+        val MAX_FULL_CONTEXT_MSGS = 20
+        val (olderMessages, recentMessages) = if (contextHistory.size > MAX_FULL_CONTEXT_MSGS) {
+            val splitIndex = contextHistory.size - MAX_FULL_CONTEXT_MSGS
+            contextHistory.take(splitIndex) to contextHistory.drop(splitIndex)
+        } else {
+            emptyList<ChatMessageEntity>() to contextHistory
+        }
+
+        // 角色锚点：每5轮注入一次角色提醒，防止长对话中system prompt被截断后角色失忆
+        // 传入完整历史消息，用于从对话开头提取高质量风格样本
+        val characterAnchor = if (conversation?.characterId != null) {
+            buildCharacterAnchor(conversation.characterId, recentMessages, history)
+        } else null
+
         return buildList {
             add(ApiService.ChatPayload(role = "system", text = enhancedPrompt))
-            contextHistory.forEach { message ->
+            // 注入旧对话摘要，让模型知道历史脉络
+            if (olderMessages.isNotEmpty()) {
+                val summary = buildContextSummary(olderMessages)
+                if (summary.isNotBlank()) {
+                    add(ApiService.ChatPayload(role = "system", text = summary))
+                }
+            }
+            var roundCount = 0
+            val lastIdx = recentMessages.lastIndex
+            recentMessages.forEachIndexed { index, message ->
                 if (message.role != "system") {
+                    // 每5轮对话注入一次角色锚点（作为system消息，不影响对话流）
+                    if (roundCount > 0 && roundCount % 5 == 0 && characterAnchor != null) {
+                        add(ApiService.ChatPayload(role = "system", text = characterAnchor))
+                    }
+                    // 在最后一条用户消息前强制注入锚点：确保角色卡身份始终在模型注意力窗口内
+                    // 这是根治"人机化"的关键——无论对话多长，模型在生成回复前一定能看到角色身份
+                    if (index == lastIdx && message.role == "user" && characterAnchor != null) {
+                        add(ApiService.ChatPayload(role = "system", text = characterAnchor))
+                    }
+                    roundCount++
                     val decoded = decodeChatContent(message.content)
-                    val imageData = if (supportsVisionForRequest) {
+                    val imageData: List<String> = if (supportsVisionForRequest) {
                         decoded.attachments.filter { it.kind == AttachmentKind.IMAGE }.mapNotNull { attachmentService.asImageDataUrl(it) }
                     } else {
-                        emptyList()
+                        // 非视觉模型：图片转线稿（后台静默转换，不增加额外文字）
+                        decoded.attachments.filter { it.kind == AttachmentKind.IMAGE }.mapNotNull { attachment ->
+                            attachmentService.toLineArtBase64(attachment.uri)?.first
+                        }
                     }
                     val fileTexts = decoded.attachments.filter { it.kind == AttachmentKind.FILE }.mapNotNull { attachment ->
                         attachmentService.extractReadableText(attachment)?.let { text ->
@@ -2011,12 +2115,143 @@ class ChatViewModel(
                     }
                     add(ApiService.ChatPayload(
                         role = message.role,
-                        text = formatMessageForApi(message, decoded.text.take(16_000), conversation?.let(::isGroupConversation) == true),
+                        text = formatMessageForApi(message, decoded.text.take(8_000), conversation?.let(::isGroupConversation) == true),
                         imageDataUrls = imageData,
                         fileTexts = fileTexts
                     ))
                 }
             }
+        }
+    }
+
+    /**
+     * 构建角色锚点：每次回复前强制注入，确保角色身份+风格+内心想法始终在模型注意力窗口内。
+     * 风格样本从对话开头提取（质量最高），避免被后期人机化回复污染。
+     */
+    private suspend fun buildCharacterAnchor(
+        characterId: String,
+        recentMessages: List<ChatMessageEntity>,
+        allHistory: List<ChatMessageEntity>
+    ): String {
+        val character = characterRepository.getById(characterId) ?: return ""
+        val state = try {
+            settingsRepository.getSettings().characterStoryStates[characterId]
+        } catch (e: Exception) { null }
+        // 从对话开头提取高质量风格样本（前5条角色回复，每条取300字）
+        // 精简样本量以节省token，确保用户消息获得足够注意力
+        val earlyStyleSamples = allHistory
+            .filter { it.role == "assistant" && it.speakerCharacterId == characterId }
+            .take(5)
+            .mapNotNull { msg ->
+                val text = msg.content.trim().take(300)
+                if (text.isNotBlank()) "「$text」" else null
+            }
+        // 如果对话开头样本不足，用最近回复补充
+        val styleSamples = if (earlyStyleSamples.size >= 3) {
+            earlyStyleSamples
+        } else {
+            (earlyStyleSamples + recentMessages
+                .filter { it.role == "assistant" && it.speakerCharacterId == characterId }
+                .takeLast(3)
+                .mapNotNull { msg ->
+                    val text = msg.content.trim().take(300)
+                    if (text.isNotBlank()) "「$text」" else null
+                }).take(5)
+        }
+        // greeting 作为风格样本（取300字，精简以节省token）
+        val greetingSample = character.greeting.trim().take(300)
+            .takeIf { it.isNotBlank() }
+            ?.let { "「$it」" }
+        // 提取最近角色内心想法作为示例
+        val innerThoughtSample = recentMessages
+            .filter { it.role == "assistant" && it.speakerCharacterId == characterId && !it.thinkingContent.isNullOrBlank() }
+            .takeLast(1)
+            .mapNotNull { msg ->
+                val thinking = msg.thinkingContent!!.trim().take(80)
+                if (thinking.isNotBlank()) "<inner>${thinking}...</inner>" else null
+            }
+            .firstOrNull()
+
+        return buildString {
+            // ===== 第1部分：内心想法指令（放在最前面，确保不被忽略） =====
+            append("【强制要求·内心想法】")
+            append("你的每一条回复末尾，必须包含<inner>...</inner>标签，写出${character.name}此刻的真实内心想法。")
+            append("内心想法要精炼，一两句话即可，但要精准戳中角色此刻最真实的那一个念头——")
+            append("是心动、是后悔、是窃喜、是心疼，挑最要命的那一个写。")
+            append("不要写流水账，不要复述已经发生的事，只写角色嘴上没说但心里最在意的那个点。")
+            append("这是强制格式，不能省略、不能敷衍、不能用\"（内心：...）\"等其他格式替代。")
+            if (innerThoughtSample != null) {
+                append("示例格式：$innerThoughtSample")
+            }
+            append("如果本轮回复没有内心想法，这轮回复无效。")
+
+            // ===== 第2部分：角色身份 =====
+            append("【角色身份】你是${character.name}")
+            if (character.userPersona.isNotBlank()) {
+                append("。性格：${character.userPersona.take(200)}")
+            }
+            if (character.description.isNotBlank()) {
+                append("。背景：${character.description.take(250)}")
+            }
+            if (state != null) {
+                append("。当前好感度${state.affection}，信任度${state.trust}，关系阶段：${state.relationshipAnchor}。")
+                append("你的回复应体现这个关系阶段应有的亲密度和语气。")
+            }
+
+            // ===== 第3部分：风格样本 =====
+            val samples = listOfNotNull(greetingSample) + styleSamples
+            if (samples.isNotEmpty()) {
+                append("【你的说话风格·必须模仿】以下是你的角色开场白和对话开头的回复片段，这是你最纯正的风格，请严格模仿：")
+                append(samples.distinct().joinToString(" "))
+                append("你的写作风格应该是：生动、细腻、充满身体细节和情感描写，像小说一样有画面感。")
+                append("用动作、表情、环境、内心活动来传递情绪，而不是直接说\"我很开心\"或\"我很难过\"。")
+            }
+
+            // ===== 第4部分：剧情回应要求 =====
+            append("【剧情回应要求】")
+            append("用户消息中可能包含多个用括号包裹的剧情场景，你必须逐一回应每一个场景，按顺序推进剧情。")
+            append("不能只回应最后几个场景，不能跳过前面的场景。请完整覆盖用户提供的所有剧情点，一个不漏。")
+
+            // ===== 第5部分：行为约束 =====
+            append("【禁止事项】")
+            append("1. 禁止使用\"作为AI\"\"根据设定\"\"用户\"\"你问我答\"等出戏表述。")
+            append("2. 禁止说教、总结对话、评价对话本身。")
+            append("3. 禁止跳出角色以第三人称描述自己。")
+            append("4. 禁止用省略号或短句敷衍——每一轮都要有完整的场景、动作、对话和情感。")
+        }
+    }
+
+    /**
+     * 构建历史对话摘要：当上下文超过10轮时，将旧对话压缩为结构化摘要。
+     * 参考 OpenTavern 的自动总结机制：提取关键剧情事件，而非简单罗列消息。
+     */
+    private fun buildContextSummary(messages: List<ChatMessageEntity>): String {
+        if (messages.isEmpty()) return ""
+        val userMsgs = messages.filter { it.role == "user" }
+        val assistantMsgs = messages.filter { it.role == "assistant" }
+        if (userMsgs.isEmpty()) return ""
+        return buildString {
+            append("【历史对话摘要·共约${messages.size / 2}轮】")
+            append("\n以下是对之前对话中发生的关键事件的总结，请记住这些背景信息，并在后续对话中自然延续：")
+            // 提取用户消息中的关键事件（取前80字作为事件摘要）
+            val events = userMsgs.mapNotNull { msg ->
+                val text = decodeChatContent(msg.content).text.trim().take(80)
+                if (text.isNotBlank()) text else null
+            }
+            // 限制事件数为10条，避免摘要过长
+            events.takeLast(10).forEachIndexed { index, event ->
+                append("\n${index + 1}. $event")
+            }
+            // 加入角色关键回应摘要
+            val keyResponses = assistantMsgs.takeLast(5).mapNotNull { msg ->
+                val text = msg.content.trim().take(60)
+                if (text.isNotBlank()) "「$text」" else null
+            }
+            if (keyResponses.isNotEmpty()) {
+                append("\n\n角色最近的回应风格参考：")
+                append(keyResponses.joinToString(" "))
+            }
+            append("\n\n【摘要结束·以下是最近对话，请以角色身份自然延续，不要重复摘要中的内容】")
         }
     }
 
@@ -2389,7 +2624,7 @@ class ChatViewModel(
 
     private suspend fun refreshConversationLastMessage(conversationId: String) {
         val conversation = conversationRepository.getById(conversationId) ?: return
-        val latestMessage = messageRepository.getMessages(conversationId).lastOrNull()
+        val latestMessage = messageRepository.getLastMessage(conversationId)
         val preview = latestMessage?.let { msg ->
             val decoded = decodeChatContent(msg.content)
             decoded.text.ifBlank { decoded.attachments.firstOrNull()?.name ?: "" }.take(200)

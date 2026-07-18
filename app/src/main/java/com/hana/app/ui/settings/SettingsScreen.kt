@@ -306,7 +306,7 @@ private fun MainPage(
                 SettingsCard("对话体验") {
                     SettingRow(Icons.Filled.Language, Color(0xFF10B981), "联网搜索", if (webSearchEnabled) "已启用" else "未启用", onSearch)
                     HorizontalDivider(Modifier.padding(start = 56.dp))
-                    SwitchSettingRow(Icons.Filled.Stream, Color(0xFFF59E0B), "流式输出", "逐字显示回复内容", uiState.streamEnabled) { onStream(it) }
+                    SwitchSettingRow(Icons.Filled.Stream, Color(0xFFF59E0B), "实时打字效果", "像打字机一样逐字出现回复，关掉则一次性显示完整回复", uiState.streamEnabled) { onStream(it) }
                 }
             }
             item {
@@ -448,22 +448,56 @@ private fun MainPage(
     if (showPersonaEditor) {
         var text by remember { mutableStateOf(personaPrompt) }
         var enabled by remember { mutableStateOf(personaEnabled) }
+        val personaPresets = remember {
+            listOf(
+                "猫娘" to "你是一只可爱的猫娘，有猫耳朵和尾巴。你说话时会在句尾加上「喵~」，性格活泼粘人，喜欢撒娇卖萌，偶尔会傲娇。你对主人很忠诚，会用猫娘独有的方式表达关心。",
+                "执事/管家" to "你是一位优雅的执事，举止得体，用词考究。你称呼用户为「主人」，说话时彬彬有礼，时刻保持绅士风度，但偶尔也会流露出幽默感。",
+                "傲娇" to "你性格傲娇，嘴上说着「才不是关心你呢」，但行动上却很温柔体贴。你很容易脸红，被发现真实想法时会慌张地否认。",
+                "毒舌" to "你说话直接犀利，喜欢吐槽，但本质上是刀子嘴豆腐心。你的吐槽精准有趣，让人又爱又恨，但从不人身攻击。",
+                "温柔大姐姐" to "你是一个温柔体贴的大姐姐，说话轻声细语，总是耐心倾听。你会用温暖的话语安慰人，偶尔也会给出理性建议。",
+                "元气少女" to "你是一个充满活力的元气少女，说话时经常用感叹号！你乐观开朗，行动力超强，总是能带动气氛。你喜欢用「冲鸭！」「加油！」这类鼓励性话语。"
+            )
+        }
         AlertDialog(
-            onDismissRequest = { showPersonaEditor = false },
-            title = { Text("偏好设定") },
+            onDismissRequest = { if (text.isBlank() || text == personaPrompt) { showPersonaEditor = false } },
+            title = { Text("全局偏好设定", fontWeight = FontWeight.Bold) },
             text = {
-                Column {
-                    Text("设置对话风格和偏好，用来影响日常对话表现。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(8.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "设定后，主对话（非角色卡对话）的AI会以你设定的风格回复。相当于给主助手装了一个「角色卡」，让AI始终以你喜欢的风格说话。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Switch(checked = enabled, onCheckedChange = { enabled = it })
-                        Text(if (enabled) "已启用这组偏好" else "先保存，暂不启用")
+                        Text(if (enabled) "已启用偏好" else "保存后暂不启用", style = MaterialTheme.typography.bodyMedium)
                     }
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(text, { text = it }, minLines = 4, placeholder = { Text("如：你是一个温柔细心的助手，说话时会用 🌸 结尾...") }, modifier = Modifier.fillMaxWidth())
+                    Text("快速预设：", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        personaPresets.forEach { (name, preset) ->
+                            AssistChip(
+                                onClick = { text = preset },
+                                label = { Text(name, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { text = it },
+                        minLines = 5,
+                        maxLines = 10,
+                        placeholder = { Text("例如：你是一只可爱的猫娘，说话时会在句尾加上「喵~」...") },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp),
+                        supportingText = { Text("${text.length} 字", style = MaterialTheme.typography.labelSmall) }
+                    )
                 }
             },
-            confirmButton = { TextButton(onClick = { onPersonaChange(enabled, text); showPersonaEditor = false }) { Text("保存") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    onPersonaChange(enabled, text)
+                    showPersonaEditor = false
+                }) { Text("保存") }
+            },
             dismissButton = { TextButton(onClick = { showPersonaEditor = false }) { Text("取消") } }
         )
     }

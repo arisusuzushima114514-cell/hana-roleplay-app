@@ -3,7 +3,7 @@ package com.hana.app
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
-import androidx.activity.ComponentActivity
+import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -48,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hana.app.BuildConfig
 import com.hana.app.core.AppContainer
 import com.hana.app.data.settings.SettingsRepository
 import com.hana.app.manager.BackgroundTarget
@@ -58,6 +59,7 @@ import com.hana.app.ui.character.CharacterEditScreen
 import com.hana.app.ui.character.CharacterListScreen
 import com.hana.app.ui.character.StoryCreateScreen
 import com.hana.app.ui.chat.ChatScreenWithDrawer
+import com.hana.app.ui.components.UpdateChangelogDialog
 import com.hana.app.ui.settings.SettingsScreen
 import com.hana.app.ui.theme.HanaTheme
 import com.hana.app.ui.theme.ThemeMode
@@ -87,7 +89,7 @@ private data class AutoThemeSuggestion(
     val tag: String
 )
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
     private val appContainer by lazy { AppContainer(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -197,6 +199,9 @@ private fun WorkspaceApp(appContainer: AppContainer) {
         var backgroundSourceChoices by remember { mutableStateOf<List<PendingBackgroundSelection>>(emptyList()) }
         var showBackgroundLibrary by remember { mutableStateOf(false) }
         var renamingBackground by remember { mutableStateOf<SavedBackgroundInfo?>(null) }
+        var sceneGeneratedUrls by remember { mutableStateOf<List<String>>(emptyList()) }
+        var sceneGenError by remember { mutableStateOf<String?>(null) }
+        var isGeneratingScene by remember { mutableStateOf(false) }
         var lastBackPressedAt by rememberSaveable { mutableStateOf(0L) }
         val editingCharacter = uiState.characters.firstOrNull { it.id == editingCharacterId }
         val selectedCharacterForChat = uiState.characters.firstOrNull { it.id == selectedCharacterIdForChat }
@@ -375,6 +380,13 @@ private fun WorkspaceApp(appContainer: AppContainer) {
             onDismiss = { renamingBackground = null }
         )
 
+        // 切换角色时清除场景捕捉残留状态
+        LaunchedEffect(selectedCharacterForChat?.id) {
+            sceneGeneratedUrls = emptyList()
+            sceneGenError = null
+            isGeneratingScene = false
+        }
+
         if (selectedCharacterForChat != null) {
             CharacterChatScreen(
                 character = selectedCharacterForChat,
@@ -425,7 +437,27 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 getConversationByCharacterId = { characterId ->
                     uiState.conversations.firstOrNull { it.characterId == characterId }
                 },
-                errorFlow = chatViewModel.errorFlow
+                errorFlow = chatViewModel.errorFlow,
+                onGenerateSceneImage = { prompt ->
+                    isGeneratingScene = true
+                    sceneGeneratedUrls = emptyList()
+                    sceneGenError = null
+                    imageGenerationViewModel.generateSceneImage(prompt) { urls, error ->
+                        isGeneratingScene = false
+                        if (urls.isNotEmpty()) {
+                            sceneGeneratedUrls = urls
+                        } else {
+                            sceneGenError = error
+                        }
+                    }
+                },
+                isGeneratingScene = isGeneratingScene,
+                sceneImageUrls = sceneGeneratedUrls,
+                sceneImageError = sceneGenError,
+                onDismissSceneImage = {
+                    sceneGeneratedUrls = emptyList()
+                    sceneGenError = null
+                }
             )
         } else {
             Scaffold(
@@ -794,8 +826,103 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 }
             )
         }
+
+        // ===== 版本更新日志弹窗 =====
+        var showChangelog by remember { mutableStateOf(false) }
+        var hasShownThisSession by remember { mutableStateOf(false) }
+        val settingsRepo = remember { SettingsRepository(context) }
+        val currentVersion = BuildConfig.VERSION_NAME
+
+        LaunchedEffect(Unit) {
+            settingsRepo.getLastSeenChangelogVersion().collect { seen ->
+                if (!hasShownThisSession && seen != currentVersion && currentVersion.isNotBlank()) {
+                    showChangelog = true
+                    hasShownThisSession = true
+                }
+            }
+        }
+
+        if (showChangelog) {
+            UpdateChangelogDialog(
+                versionName = currentVersion,
+                changelog = CHANGELOG_V1_7_5,
+                onDismiss = { showChangelog = false },
+                onDontShowAgain = { dontShow ->
+                    appScope.launch {
+                        if (dontShow) {
+                            settingsRepo.markChangelogSeen(currentVersion)
+                        }
+                    }
+                }
+            )
+        }
     }
 }
+
+/**
+ * v1.7.5 更新内容，供弹窗显示。
+ */
+private val CHANGELOG_V1_7_5 = """
+### 回复质量大幅优化（重要）
+
+- 锚点新增「剧情回应要求」：强制逐一回应所有剧情点，不再只读最后两个
+- 风格样本精简（8条→5条，每条400字→300字），释放 ~1000 tokens 给用户消息
+- 上下文压缩阈值 30轮→10轮，让摘要机制默认生效，防止 token 溢出
+- 单条消息截断 16000字→8000字，防止超长消息撑爆上下文
+- 历史摘要优化为结构化事件列表，参考 OpenTavern 总结机制
+
+### Bug 修复
+
+- 角色卡导入头像空白：PNG角色卡导入时自动保存图片为本地头像
+- 更新推送弹窗重复弹出：增加 hasShownThisSession 守卫，每次启动只弹一次
+
+### 交互优化
+
+- 用户消息支持一键复制（三点菜单），与角色消息一致
+- 蓝色气泡内选中文字可见性修复：高亮色改为半透明白色
+""".trimIndent()
+
+/**
+ * v1.7.4 更新内容，供弹窗显示。
+ */
+private val CHANGELOG_V1_7_4 = """
+### 长对话防退化（重要）
+
+- 每次回复前强制注入角色卡锚点，确保角色身份始终在模型注意力窗口内
+- 锚点包含角色身份、风格样本、内心想法示例和禁止事项
+- 上下文压缩：超过30轮自动摘要旧对话，保留最近30轮完整内容
+- 不再出现40轮后角色失忆变人机的问题
+
+### 内心想法强化
+
+- 内心想法指令前置到锚点最前面，不再被忽略
+- 提取角色真实内心想法作为格式示例
+- 精炼指令：要精不要长，一两句话戳中核心
+
+### 风格样本大幅增强
+
+- 从对话开头提取高质量回复作为风格参照（前8条，每条400字）
+- 额外注入角色开场白作为风格样本（500字）
+- 避免人机化回复污染风格，保持角色一致性
+
+### 角色对话界面精简
+
+- 顶部栏精简为单行，冗余功能收入三点菜单
+- 底部输入栏紧凑化，缩小圆角和阴影
+- 键盘弹出时对话区域不再被挤压，可正常阅读
+
+### 多机型适配
+
+- 参数面板支持垂直滚动，小屏不裁切按钮
+- Slider 流畅度优化，低端设备不卡顿
+- 上下文轮数范围统一为 1~999
+
+### 其他优化
+
+- 默认最大回复长度 4096 → 8192 tokens
+- 参数保存后即时同步 UI，不显示旧值
+- 深色模式配色优化
+- 新增版本更新推送弹窗，每次更新自动展示""".trimIndent()
 
 private fun currentAutoThemeSuggestion(now: Calendar = Calendar.getInstance()): AutoThemeSuggestion? {
     val hour = now.get(Calendar.HOUR_OF_DAY)

@@ -10,7 +10,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.background
@@ -119,8 +118,8 @@ fun ChatScreenWithDrawer(
     onSaveAttachmentImage: (String) -> Unit = {},
     onStopGeneration: () -> Unit,
     onRetryLastUserMessage: () -> Unit,
-    onUpdateConversationParameters: (String?, Float, Float, Int, Int) -> Unit,
-    onUpdateSystemPrompt: (String) -> Unit,
+    onUpdateConversationParameters: (String?, Float, Float, Int, Int, String?) -> Unit,
+    onUpdateSystemPrompt: (String, String?) -> Unit,
     onToggleWebSearch: () -> Unit,
     onToggleFavorite: (ChatMessageEntity) -> Unit,
     onTogglePinned: (String) -> Unit = {},
@@ -653,7 +652,7 @@ private fun NetworkStatusNotification(
             targetOffsetY = { -it / 3 }
         )
     ) {
-        BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        Box(modifier = modifier.fillMaxWidth()) {
             Surface(
                 color = containerColor,
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
