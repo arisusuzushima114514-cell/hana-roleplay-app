@@ -4,7 +4,6 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
-import androidx.room.Update
 import com.hana.app.data.db.entity.ConversationEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -21,9 +20,6 @@ interface ConversationDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: ConversationEntity)
-
-    @Update
-    suspend fun update(entity: ConversationEntity)
 
     @Query("DELETE FROM conversations WHERE id = :id")
     suspend fun deleteById(id: String)
@@ -48,4 +44,61 @@ interface ConversationDao {
 
     @Query("UPDATE conversations SET isFavorite = NOT isFavorite WHERE id = :id")
     suspend fun toggleFavorite(id: String)
+
+    @Query("UPDATE conversations SET lastMessage = :lastMessage, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateLastMessage(id: String, lastMessage: String?, updatedAt: Long)
+
+    @Query("UPDATE conversations SET title = :title, isNamed = :isNamed, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun rename(id: String, title: String, isNamed: Boolean, updatedAt: Long)
+
+    @Query("""
+        UPDATE conversations
+        SET modelName = :modelName, temperature = :temperature, topP = :topP,
+            maxTokens = :maxTokens, contextLimit = :contextLimit, updatedAt = :updatedAt
+        WHERE id = :id
+    """)
+    suspend fun updateParameters(
+        id: String,
+        modelName: String?,
+        temperature: Float,
+        topP: Float,
+        maxTokens: Int,
+        contextLimit: Int,
+        updatedAt: Long
+    )
+
+    @Query("UPDATE conversations SET systemPrompt = :systemPrompt, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateSystemPrompt(id: String, systemPrompt: String?, updatedAt: Long)
+
+    @Query("""
+        UPDATE conversations
+        SET historySummary = :historySummary,
+            summaryUpToMessageId = :summaryUpToMessageId,
+            updatedAt = :updatedAt
+        WHERE id = :id
+    """)
+    suspend fun updateHistorySummary(
+        id: String,
+        historySummary: String?,
+        summaryUpToMessageId: Long?,
+        updatedAt: Long
+    )
+
+    @Query("UPDATE conversations SET authorNote = :authorNote, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateAuthorNote(id: String, authorNote: String?, updatedAt: Long)
+
+    @Query("UPDATE conversations SET worldInfo = :worldInfo, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateWorldInfo(id: String, worldInfo: String?, updatedAt: Long)
+
+    @Query("UPDATE conversations SET groupScene = :groupScene, groupSceneLocked = :locked, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateGroupScene(id: String, groupScene: String?, locked: Boolean, updatedAt: Long)
+
+    @Query("UPDATE conversations SET totalTokens = totalTokens + :tokens, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun addTokenUsage(id: String, tokens: Int, updatedAt: Long)
+
+    @Query("SELECT * FROM conversations WHERE conversationType = 'group'")
+    suspend fun getGroupConversations(): List<ConversationEntity>
+
+    @Query("UPDATE conversations SET participantCharacterIds = :participantCharacterIds, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateParticipants(id: String, participantCharacterIds: String?, updatedAt: Long)
 }

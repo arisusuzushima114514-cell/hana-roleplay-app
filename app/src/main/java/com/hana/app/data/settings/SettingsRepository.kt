@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
 import com.hana.app.ui.theme.ThemeMode
+import com.hana.app.ui.theme.ThemePalette
 import androidx.datastore.preferences.core.emptyPreferences
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -20,6 +21,9 @@ import kotlinx.coroutines.flow.map
 import org.json.JSONObject
 
 private fun normalizeSecret(value: String): String = value.trim().trim('"', '\'', ' ', '\n', '\r', '\t')
+
+fun interCharacterRelationKey(fromCharacterId: String, toCharacterId: String): String =
+    "$fromCharacterId->$toCharacterId"
 
 val DEFAULT_QUICK_PHRASES = listOf("继续", "更详细", "换个方式", "总结")
 
@@ -35,9 +39,14 @@ data class SettingsData(
     val visionBaseUrl: String = "",
     val visionApiKey: String = "",
     val visionModelName: String = "",
+    val summaryBaseUrl: String = "",
+    val summaryApiKey: String = "",
+    val summaryModelName: String = "",
+    val autoSummaryThreshold: Int = DEFAULT_AUTO_SUMMARY_THRESHOLD,
     val supportsImage: Boolean = false,
     val supportsFile: Boolean = false,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    val themePalette: ThemePalette = ThemePalette.VIOLET,
     val voiceInputEnabled: Boolean = true,
     val streamEnabled: Boolean = true,
     val searchIndependentMode: Boolean = true,
@@ -49,6 +58,9 @@ data class SettingsData(
     val creativePresetText: String = "",
     val characterCreativePresetEnabled: Map<String, Boolean> = emptyMap(),
     val characterCreativePresetAffectsPersona: Map<String, Boolean> = emptyMap(),
+    val characterCreativePresetTexts: Map<String, String> = emptyMap(),
+    val characterIndependentCreativePresetEnabled: Map<String, Boolean> = emptyMap(),
+    val characterIndependentCreativePresetAffectsPersona: Map<String, Boolean> = emptyMap(),
     val autoThemeSuggestionEnabled: Boolean = true,
     val lastAutoThemeSuggestionTag: String = "",
     val imageProviderId: Long = 0L,
@@ -56,7 +68,8 @@ data class SettingsData(
     val backgroundIntensity: String = "soft",
     val characterStoryStateMigrationVersion: Int = 0,
     val characterStoryStates: Map<String, CharacterStoryState> = emptyMap(),
-    val characterStoryLogs: Map<String, List<CharacterStoryLogEntry>> = emptyMap()
+    val characterStoryLogs: Map<String, List<CharacterStoryLogEntry>> = emptyMap(),
+    val interCharacterRelations: Map<String, InterCharacterRelationState> = emptyMap()
 )
 
 @androidx.compose.runtime.Stable
@@ -65,6 +78,7 @@ data class CharacterStoryState(
     val trust: Int = 0,
     val tension: Int = 20,
     val relationshipAnchor: String = "未知",
+    val relationshipAnchorLocked: Boolean = false,
     val intimacyBaseline: Int = 0,
     val relationshipMomentum: Int = 0,
     val progressNote: String = "仍在起步",
@@ -82,6 +96,16 @@ data class CharacterStoryLogEntry(
     val affection: Int,
     val trust: Int,
     val tension: Int
+)
+
+@androidx.compose.runtime.Stable
+data class InterCharacterRelationState(
+    val affinity: Int = 0,
+    val rivalry: Int = 0,
+    val tension: Int = 10,
+    val relationLabel: String = "普通同伴",
+    val recentEvent: String = "",
+    val updatedAt: Long = 0L
 )
 
 class SettingsRepository(context: Context) {
@@ -112,9 +136,15 @@ class SettingsRepository(context: Context) {
             visionBaseUrl = preferences[KEY_VISION_BASE_URL] ?: "",
             visionApiKey = preferences[KEY_VISION_API_KEY] ?: "",
             visionModelName = preferences[KEY_VISION_MODEL_NAME] ?: "",
+            summaryBaseUrl = preferences[KEY_SUMMARY_BASE_URL] ?: "",
+            summaryApiKey = preferences[KEY_SUMMARY_API_KEY] ?: "",
+            summaryModelName = preferences[KEY_SUMMARY_MODEL_NAME] ?: "",
+            autoSummaryThreshold = (preferences[KEY_AUTO_SUMMARY_THRESHOLD] ?: DEFAULT_AUTO_SUMMARY_THRESHOLD)
+                .coerceIn(4, 500),
             supportsImage = preferences[KEY_SUPPORTS_IMAGE] ?: false,
             supportsFile = preferences[KEY_SUPPORTS_FILE] ?: false,
             themeMode = ThemeMode.fromValue(preferences[KEY_THEME_MODE] ?: ThemeMode.SYSTEM.value),
+            themePalette = ThemePalette.fromValue(preferences[KEY_THEME_PALETTE] ?: ThemePalette.VIOLET.value),
             voiceInputEnabled = preferences[KEY_VOICE_INPUT_ENABLED] ?: true,
             streamEnabled = preferences[KEY_STREAM_ENABLED] ?: true,
             searchIndependentMode = preferences[KEY_SEARCH_MODE] ?: true,
@@ -126,6 +156,9 @@ class SettingsRepository(context: Context) {
             creativePresetText = preferences[KEY_CREATIVE_PRESET_TEXT] ?: "",
             characterCreativePresetEnabled = parseCharacterCreativePresetEnabled(preferences[KEY_CHARACTER_CREATIVE_PRESET_ENABLED].orEmpty()),
             characterCreativePresetAffectsPersona = parseCharacterCreativePresetEnabled(preferences[KEY_CHARACTER_CREATIVE_PRESET_AFFECTS_PERSONA].orEmpty()),
+            characterCreativePresetTexts = parseCharacterTextMap(preferences[KEY_CHARACTER_CREATIVE_PRESET_TEXTS].orEmpty()),
+            characterIndependentCreativePresetEnabled = parseCharacterCreativePresetEnabled(preferences[KEY_CHARACTER_INDEPENDENT_CREATIVE_PRESET_ENABLED].orEmpty()),
+            characterIndependentCreativePresetAffectsPersona = parseCharacterCreativePresetEnabled(preferences[KEY_CHARACTER_INDEPENDENT_CREATIVE_PRESET_AFFECTS_PERSONA].orEmpty()),
             autoThemeSuggestionEnabled = preferences[KEY_AUTO_THEME_SUGGESTION_ENABLED] ?: true,
             lastAutoThemeSuggestionTag = preferences[KEY_LAST_AUTO_THEME_SUGGESTION_TAG] ?: "",
             imageProviderId = preferences[KEY_IMAGE_PROVIDER_ID] ?: 0L,
@@ -133,7 +166,8 @@ class SettingsRepository(context: Context) {
             backgroundIntensity = preferences[KEY_BACKGROUND_INTENSITY] ?: "soft",
             characterStoryStateMigrationVersion = preferences[KEY_CHARACTER_STORY_STATE_MIGRATION_VERSION] ?: 0,
             characterStoryStates = parseCharacterStoryStates(preferences[KEY_CHARACTER_STORY_STATES].orEmpty()),
-            characterStoryLogs = parseCharacterStoryLogs(preferences[KEY_CHARACTER_STORY_LOGS].orEmpty())
+            characterStoryLogs = parseCharacterStoryLogs(preferences[KEY_CHARACTER_STORY_LOGS].orEmpty()),
+            interCharacterRelations = parseInterCharacterRelations(preferences[KEY_INTER_CHARACTER_RELATIONS].orEmpty())
         ).also { cachedSettings = it }
         } catch (e: Exception) {
             Log.e("SettingsRepo", "Parse preferences failed, using defaults", e)
@@ -177,6 +211,15 @@ class SettingsRepository(context: Context) {
         }
     }
 
+    suspend fun getSummaryApiSettings(): ApiSettings {
+        val settings = getSettings()
+        return ApiSettings(
+            baseUrl = settings.summaryBaseUrl,
+            apiKey = settings.summaryApiKey,
+            modelName = settings.summaryModelName
+        )
+    }
+
     suspend fun saveApiSettings(settings: ApiSettings) {
         dataStore.edit { preferences ->
             preferences[KEY_API_BASE_URL] = settings.baseUrl.trim().trimEnd('/')
@@ -197,6 +240,13 @@ class SettingsRepository(context: Context) {
                 preferences[KEY_THEME_MODE] = mode.value
             }
         } catch (e: Exception) { Log.e("SettingsRepo", "saveThemeMode failed", e) }
+    }
+
+    suspend fun saveThemePalette(palette: ThemePalette) {
+        cachedSettings = cachedSettings.copy(themePalette = palette)
+        try {
+            dataStore.edit { preferences -> preferences[KEY_THEME_PALETTE] = palette.value }
+        } catch (e: Exception) { Log.e("SettingsRepo", "saveThemePalette failed", e) }
     }
 
     suspend fun saveBaseUrl(baseUrl: String) {
@@ -247,6 +297,20 @@ class SettingsRepository(context: Context) {
         }
     }
 
+    suspend fun saveSummarySettings(baseUrl: String, apiKey: String, modelName: String) {
+        dataStore.edit { preferences ->
+            preferences[KEY_SUMMARY_BASE_URL] = baseUrl.trim().trimEnd('/')
+            preferences[KEY_SUMMARY_API_KEY] = normalizeSecret(apiKey)
+            preferences[KEY_SUMMARY_MODEL_NAME] = modelName.trim()
+        }
+    }
+
+    suspend fun saveAutoSummaryThreshold(threshold: Int) {
+        dataStore.edit { preferences ->
+            preferences[KEY_AUTO_SUMMARY_THRESHOLD] = threshold.coerceIn(4, 500)
+        }
+    }
+
     suspend fun saveSupportsImage(value: Boolean) {
         dataStore.edit { preferences -> preferences[KEY_SUPPORTS_IMAGE] = value }
     }
@@ -289,6 +353,11 @@ class SettingsRepository(context: Context) {
     }
 
     suspend fun saveCharacterCreativePresetEnabled(characterId: String, enabled: Boolean) {
+        cachedSettings = cachedSettings.copy(
+            characterCreativePresetEnabled = cachedSettings.characterCreativePresetEnabled.toMutableMap().apply {
+                put(characterId, enabled)
+            }
+        )
         try {
             dataStore.edit { p ->
                 val current = parseCharacterCreativePresetEnabled(p[KEY_CHARACTER_CREATIVE_PRESET_ENABLED].orEmpty()).toMutableMap()
@@ -299,6 +368,11 @@ class SettingsRepository(context: Context) {
     }
 
     suspend fun saveCharacterCreativePresetAffectsPersona(characterId: String, enabled: Boolean) {
+        cachedSettings = cachedSettings.copy(
+            characterCreativePresetAffectsPersona = cachedSettings.characterCreativePresetAffectsPersona.toMutableMap().apply {
+                put(characterId, enabled)
+            }
+        )
         try {
             dataStore.edit { p ->
                 val current = parseCharacterCreativePresetEnabled(p[KEY_CHARACTER_CREATIVE_PRESET_AFFECTS_PERSONA].orEmpty()).toMutableMap()
@@ -309,9 +383,56 @@ class SettingsRepository(context: Context) {
     }
 
     suspend fun saveCreativePresetText(value: String) {
+        cachedSettings = cachedSettings.copy(creativePresetText = value.trim())
         try {
             dataStore.edit { p -> p[KEY_CREATIVE_PRESET_TEXT] = value.trim() }
         } catch (e: Exception) { Log.e("SettingsRepo", "saveCreativePresetText", e) }
+    }
+
+    suspend fun saveCharacterCreativePresetText(characterId: String, value: String) {
+        val normalized = value.trim()
+        cachedSettings = cachedSettings.copy(
+            characterCreativePresetTexts = cachedSettings.characterCreativePresetTexts.toMutableMap().apply {
+                if (normalized.isBlank()) remove(characterId) else put(characterId, normalized)
+            }
+        )
+        try {
+            dataStore.edit { p ->
+                val current = parseCharacterTextMap(p[KEY_CHARACTER_CREATIVE_PRESET_TEXTS].orEmpty()).toMutableMap()
+                if (normalized.isBlank()) current.remove(characterId) else current[characterId] = normalized
+                p[KEY_CHARACTER_CREATIVE_PRESET_TEXTS] = serializeCharacterTextMap(current)
+            }
+        } catch (e: Exception) { Log.e("SettingsRepo", "saveCharacterCreativePresetText", e) }
+    }
+
+    suspend fun saveCharacterIndependentCreativePresetEnabled(characterId: String, enabled: Boolean) {
+        cachedSettings = cachedSettings.copy(
+            characterIndependentCreativePresetEnabled = cachedSettings.characterIndependentCreativePresetEnabled.toMutableMap().apply {
+                put(characterId, enabled)
+            }
+        )
+        try {
+            dataStore.edit { p ->
+                val current = parseCharacterCreativePresetEnabled(p[KEY_CHARACTER_INDEPENDENT_CREATIVE_PRESET_ENABLED].orEmpty()).toMutableMap()
+                current[characterId] = enabled
+                p[KEY_CHARACTER_INDEPENDENT_CREATIVE_PRESET_ENABLED] = serializeCharacterCreativePresetEnabled(current)
+            }
+        } catch (e: Exception) { Log.e("SettingsRepo", "saveCharacterIndependentCreativePresetEnabled", e) }
+    }
+
+    suspend fun saveCharacterIndependentCreativePresetAffectsPersona(characterId: String, enabled: Boolean) {
+        cachedSettings = cachedSettings.copy(
+            characterIndependentCreativePresetAffectsPersona = cachedSettings.characterIndependentCreativePresetAffectsPersona.toMutableMap().apply {
+                put(characterId, enabled)
+            }
+        )
+        try {
+            dataStore.edit { p ->
+                val current = parseCharacterCreativePresetEnabled(p[KEY_CHARACTER_INDEPENDENT_CREATIVE_PRESET_AFFECTS_PERSONA].orEmpty()).toMutableMap()
+                current[characterId] = enabled
+                p[KEY_CHARACTER_INDEPENDENT_CREATIVE_PRESET_AFFECTS_PERSONA] = serializeCharacterCreativePresetEnabled(current)
+            }
+        } catch (e: Exception) { Log.e("SettingsRepo", "saveCharacterIndependentCreativePresetAffectsPersona", e) }
     }
 
     suspend fun saveAutoThemeSuggestionEnabled(enabled: Boolean) {
@@ -345,6 +466,11 @@ class SettingsRepository(context: Context) {
     }
 
     suspend fun saveCharacterStoryState(characterId: String, state: CharacterStoryState) {
+        cachedSettings = cachedSettings.copy(
+            characterStoryStates = cachedSettings.characterStoryStates.toMutableMap().apply {
+                put(characterId, state)
+            }
+        )
         try {
             dataStore.edit { p ->
                 val current = parseCharacterStoryStates(p[KEY_CHARACTER_STORY_STATES].orEmpty()).toMutableMap()
@@ -355,6 +481,11 @@ class SettingsRepository(context: Context) {
     }
 
     suspend fun appendCharacterStoryLog(characterId: String, entry: CharacterStoryLogEntry) {
+        cachedSettings = cachedSettings.copy(
+            characterStoryLogs = cachedSettings.characterStoryLogs.toMutableMap().apply {
+                put(characterId, (get(characterId).orEmpty().toMutableList().apply { add(0, entry) }).take(50))
+            }
+        )
         try {
             dataStore.edit { p ->
                 val current = parseCharacterStoryLogs(p[KEY_CHARACTER_STORY_LOGS].orEmpty()).toMutableMap()
@@ -375,6 +506,10 @@ class SettingsRepository(context: Context) {
     }
 
     suspend fun clearCharacterStoryState(characterId: String) {
+        cachedSettings = cachedSettings.copy(
+            characterStoryStates = cachedSettings.characterStoryStates - characterId,
+            characterStoryLogs = cachedSettings.characterStoryLogs - characterId
+        )
         try {
             dataStore.edit { p ->
                 val states = parseCharacterStoryStates(p[KEY_CHARACTER_STORY_STATES].orEmpty()).toMutableMap()
@@ -386,6 +521,20 @@ class SettingsRepository(context: Context) {
                 p[KEY_CHARACTER_STORY_LOGS] = serializeCharacterStoryLogs(logs)
             }
         } catch (e: Exception) { Log.e("SettingsRepo", "clearCharacterStoryState", e) }
+    }
+
+    suspend fun saveInterCharacterRelation(fromCharacterId: String, toCharacterId: String, state: InterCharacterRelationState) {
+        val key = interCharacterRelationKey(fromCharacterId, toCharacterId)
+        cachedSettings = cachedSettings.copy(
+            interCharacterRelations = cachedSettings.interCharacterRelations.toMutableMap().apply { put(key, state) }
+        )
+        try {
+            dataStore.edit { p ->
+                val current = parseInterCharacterRelations(p[KEY_INTER_CHARACTER_RELATIONS].orEmpty()).toMutableMap()
+                current[key] = state
+                p[KEY_INTER_CHARACTER_RELATIONS] = serializeInterCharacterRelations(current)
+            }
+        } catch (e: Exception) { Log.e("SettingsRepo", "saveInterCharacterRelation", e) }
     }
 
     suspend fun addHistoricalTokens(tokens: Int) {
@@ -440,9 +589,14 @@ class SettingsRepository(context: Context) {
         private val KEY_VISION_BASE_URL = stringPreferencesKey("vision_base_url")
         private val KEY_VISION_API_KEY = stringPreferencesKey("vision_api_key")
         private val KEY_VISION_MODEL_NAME = stringPreferencesKey("vision_model_name")
+        private val KEY_SUMMARY_BASE_URL = stringPreferencesKey("summary_base_url")
+        private val KEY_SUMMARY_API_KEY = stringPreferencesKey("summary_api_key")
+        private val KEY_SUMMARY_MODEL_NAME = stringPreferencesKey("summary_model_name")
+        private val KEY_AUTO_SUMMARY_THRESHOLD = intPreferencesKey("auto_summary_threshold")
         private val KEY_SUPPORTS_IMAGE = booleanPreferencesKey("supports_image")
         private val KEY_SUPPORTS_FILE = booleanPreferencesKey("supports_file")
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
+        private val KEY_THEME_PALETTE = stringPreferencesKey("theme_palette")
         private val KEY_VOICE_INPUT_ENABLED = booleanPreferencesKey("voice_input")
         private val KEY_STREAM_ENABLED = booleanPreferencesKey("stream_enabled")
         private val KEY_SEARCH_URL = stringPreferencesKey("search_url")
@@ -454,6 +608,9 @@ class SettingsRepository(context: Context) {
         private val KEY_CREATIVE_PRESET_TEXT = stringPreferencesKey("creative_preset_text")
         private val KEY_CHARACTER_CREATIVE_PRESET_ENABLED = stringPreferencesKey("character_creative_preset_enabled")
         private val KEY_CHARACTER_CREATIVE_PRESET_AFFECTS_PERSONA = stringPreferencesKey("character_creative_preset_affects_persona")
+        private val KEY_CHARACTER_CREATIVE_PRESET_TEXTS = stringPreferencesKey("character_creative_preset_texts")
+        private val KEY_CHARACTER_INDEPENDENT_CREATIVE_PRESET_ENABLED = stringPreferencesKey("character_independent_creative_preset_enabled")
+        private val KEY_CHARACTER_INDEPENDENT_CREATIVE_PRESET_AFFECTS_PERSONA = stringPreferencesKey("character_independent_creative_preset_affects_persona")
         private val KEY_AUTO_THEME_SUGGESTION_ENABLED = booleanPreferencesKey("auto_theme_suggestion_enabled")
         private val KEY_LAST_AUTO_THEME_SUGGESTION_TAG = stringPreferencesKey("last_auto_theme_suggestion_tag")
         private val KEY_IMAGE_PROVIDER_ID = longPreferencesKey("image_provider_id")
@@ -462,6 +619,7 @@ class SettingsRepository(context: Context) {
         private val KEY_CHARACTER_STORY_STATE_MIGRATION_VERSION = intPreferencesKey("character_story_state_migration_version")
         private val KEY_CHARACTER_STORY_STATES = stringPreferencesKey("character_story_states")
         private val KEY_CHARACTER_STORY_LOGS = stringPreferencesKey("character_story_logs")
+        private val KEY_INTER_CHARACTER_RELATIONS = stringPreferencesKey("inter_character_relations")
         private val KEY_LAST_SEEN_CHANGELOG_VERSION = stringPreferencesKey("last_seen_changelog_version")
 
         private fun parseCharacterStoryStates(raw: String): Map<String, CharacterStoryState> {
@@ -480,6 +638,7 @@ class SettingsRepository(context: Context) {
                                 trust = item.optInt("trust", 0).coerceIn(-100, 100),
                                 tension = item.optInt("tension", 20).coerceIn(0, 100),
                                 relationshipAnchor = item.optString("relationshipAnchor").ifBlank { "未知" },
+                                relationshipAnchorLocked = item.optBoolean("relationshipAnchorLocked", false),
                                 intimacyBaseline = item.optInt("intimacyBaseline", 0).coerceIn(-100, 100),
                                 relationshipMomentum = item.optInt("relationshipMomentum", 0).coerceIn(-100, 100),
                                 progressNote = item.optString("progressNote").ifBlank { "仍在起步" },
@@ -503,6 +662,7 @@ class SettingsRepository(context: Context) {
                             put("trust", state.trust)
                             put("tension", state.tension)
                             put("relationshipAnchor", state.relationshipAnchor)
+                            put("relationshipAnchorLocked", state.relationshipAnchorLocked)
                             put("intimacyBaseline", state.intimacyBaseline)
                             put("relationshipMomentum", state.relationshipMomentum)
                             put("progressNote", state.progressNote)
@@ -534,6 +694,26 @@ class SettingsRepository(context: Context) {
                 states.forEach { (characterId, enabled) ->
                     root.put(characterId, enabled)
                 }
+            }.toString()
+        }
+
+        private fun parseCharacterTextMap(raw: String): Map<String, String> {
+            if (raw.isBlank()) return emptyMap()
+            return runCatching {
+                val root = JSONObject(raw)
+                buildMap {
+                    val iterator = root.keys()
+                    while (iterator.hasNext()) {
+                        val key = iterator.next()
+                        root.optString(key).takeIf { it.isNotBlank() }?.let { put(key, it) }
+                    }
+                }
+            }.getOrDefault(emptyMap())
+        }
+
+        private fun serializeCharacterTextMap(states: Map<String, String>): String {
+            return JSONObject().also { root ->
+                states.forEach { (characterId, text) -> root.put(characterId, text) }
             }.toString()
         }
 
@@ -586,6 +766,46 @@ class SettingsRepository(context: Context) {
                         )
                     }
                     root.put(characterId, array)
+                }
+            }.toString()
+        }
+
+        private fun parseInterCharacterRelations(raw: String): Map<String, InterCharacterRelationState> {
+            if (raw.isBlank()) return emptyMap()
+            return runCatching {
+                val root = JSONObject(raw)
+                buildMap {
+                    val iterator = root.keys()
+                    while (iterator.hasNext()) {
+                        val key = iterator.next()
+                        val item = root.optJSONObject(key) ?: continue
+                        put(
+                            key,
+                            InterCharacterRelationState(
+                                affinity = item.optInt("affinity", 0).coerceIn(-100, 100),
+                                rivalry = item.optInt("rivalry", 0).coerceIn(0, 100),
+                                tension = item.optInt("tension", 10).coerceIn(0, 100),
+                                relationLabel = item.optString("relationLabel").ifBlank { "普通同伴" },
+                                recentEvent = item.optString("recentEvent"),
+                                updatedAt = item.optLong("updatedAt", 0L)
+                            )
+                        )
+                    }
+                }
+            }.getOrDefault(emptyMap())
+        }
+
+        private fun serializeInterCharacterRelations(relations: Map<String, InterCharacterRelationState>): String {
+            return JSONObject().also { root ->
+                relations.forEach { (key, state) ->
+                    root.put(key, JSONObject().apply {
+                        put("affinity", state.affinity)
+                        put("rivalry", state.rivalry)
+                        put("tension", state.tension)
+                        put("relationLabel", state.relationLabel)
+                        put("recentEvent", state.recentEvent)
+                        put("updatedAt", state.updatedAt)
+                    })
                 }
             }.toString()
         }

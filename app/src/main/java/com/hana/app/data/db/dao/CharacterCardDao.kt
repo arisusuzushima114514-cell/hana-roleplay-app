@@ -31,4 +31,7 @@ interface CharacterCardDao {
 
     @Query("SELECT COUNT(*) FROM character_cards")
     suspend fun count(): Int
+
+    @Query("UPDATE character_cards SET lastMessageAt = :lastMessageAt, lastMessagePreview = :preview WHERE id = :id")
+    suspend fun updateLastMessage(id: String, lastMessageAt: Long, preview: String)
 }

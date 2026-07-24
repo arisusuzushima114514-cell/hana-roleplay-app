@@ -91,6 +91,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
+import com.hana.app.ui.theme.hanaChatDensityMetrics
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -128,6 +129,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.background
 import coil.compose.AsyncImage
 import com.hana.app.R
 import com.hana.app.data.db.entity.CharacterCardEntity
@@ -138,16 +140,24 @@ import com.hana.app.data.settings.CharacterStoryState
 import com.hana.app.ui.chat.ThinkingBlock
 import com.hana.app.ui.chat.ChatBackgroundArtwork
 import com.hana.app.ui.chat.ThinkingIndicator
+import com.hana.app.ui.chat.PromptPreviewDialog
 import com.hana.app.ui.theme.LocalHanaBubbleColors
+import com.hana.app.ui.theme.LocalHanaBubbleImages
+import com.hana.app.ui.theme.LocalHanaChatDisplaySettings
+import com.hana.app.ui.theme.NineSliceImage
+import java.io.File
 import com.hana.app.viewmodel.ChatUiState
+import com.hana.app.viewmodel.PromptPreviewState
 import com.hana.app.viewmodel.relationshipStageLabel
+import com.hana.app.viewmodel.latestPersistedAssistantMessage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private enum class CharacterEditorScreen {
     CharacterPersona,
     UserPersona,
-    CreativePreset
+    CreativePreset,
+    BreakArmorPrompt
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
@@ -167,16 +177,23 @@ fun CharacterChatScreen(
     onUpdateSystemPrompt: (String, String?) -> Unit,
     onToggleWebSearch: () -> Unit,
     onClearHistory: (String) -> Unit,
-    onDeleteLastRound: (String) -> Unit,
     onSaveCharacter: (CharacterCardEntity) -> Unit,
     getCharacterStoryState: (String) -> CharacterStoryState,
     getCharacterStoryLogs: (String) -> List<CharacterStoryLogEntry>,
+    onUpdateRelationshipAnchor: (String, String, Int) -> Unit,
+    onRestoreAutomaticRelationshipAnchor: (String) -> Unit,
     creativePresetText: String,
     creativePresetEnabledForCharacter: Boolean,
     creativePresetAffectsPersonaForCharacter: Boolean,
     onCreativePresetEnabledChange: (String, Boolean) -> Unit,
     onCreativePresetAffectsPersonaChange: (String, Boolean) -> Unit,
     onCreativePresetTextChange: (String) -> Unit,
+    characterCreativePresetText: String,
+    characterCreativePresetEnabled: Boolean,
+    characterCreativePresetAffectsPersona: Boolean,
+    onCharacterCreativePresetTextChange: (String) -> Unit,
+    onCharacterCreativePresetEnabledChange: (String, Boolean) -> Unit,
+    onCharacterCreativePresetAffectsPersonaChange: (String, Boolean) -> Unit,
     backgroundIntensity: String = "soft",
     onPickBackground: () -> Unit,
     onOpenBackgroundLibrary: () -> Unit,
@@ -189,22 +206,19 @@ fun CharacterChatScreen(
     isGeneratingScene: Boolean = false,
     sceneImageUrls: List<String> = emptyList(),
     sceneImageError: String? = null,
-    onDismissSceneImage: () -> Unit = {}
+    onDismissSceneImage: () -> Unit = {},
+    promptPreviewState: PromptPreviewState = PromptPreviewState(),
+    onRefreshPromptPreview: () -> Unit = {},
+    onUpdateContextLayers: (String, String, String) -> Unit = { _, _, _ -> },
+    onSummarizeHistory: (String) -> Unit = {},
+    onClearHistorySummary: (String) -> Unit = {}
 ) {
     val liveCharacter = getCharacterById(character.id) ?: character
     val bubbleColors = LocalHanaBubbleColors.current
     val conversation = getConversationByCharacterId(liveCharacter.id)
     val conversationId = conversation?.id.orEmpty()
-    val creativePresetModeLabel = when {
-        !creativePresetEnabledForCharacter -> "预设未启用"
-        creativePresetAffectsPersonaForCharacter -> "允许影响人格"
-        else -> "仅模型补充"
-    }
-    val creativePresetModeDescription = when {
-        !creativePresetEnabledForCharacter -> "未启用"
-        creativePresetAffectsPersonaForCharacter -> "允许影响人格"
-        else -> "仅模型补充"
-    }
+    val creativePresetModeLabel = if (creativePresetEnabledForCharacter) "破甲已启用" else "破甲未启用"
+    val creativePresetModeDescription = if (creativePresetEnabledForCharacter) "内置预设已启用" else "未启用"
     val messages = try {
         buildList {
             if (conversationId.isBlank()) {
@@ -215,7 +229,7 @@ fun CharacterChatScreen(
                 addAll(uiState.messages.filter { it.id > 0L && it.conversationId == conversationId })
             }
             uiState.streamingAssistant?.let {
-                if (uiState.currentConversationId == conversationId) {
+                if (it.conversationId == conversationId && uiState.currentConversationId == conversationId) {
                     add(ChatMessageEntity(id = Long.MIN_VALUE, conversationId = conversationId, role = "assistant", speakerCharacterId = it.speakerCharacterId, speakerName = it.speakerName ?: liveCharacter.name, content = it.content, thinkingContent = null, thinkingDuration = null, timestamp = System.currentTimeMillis()))
                 }
             }
@@ -243,15 +257,16 @@ fun CharacterChatScreen(
         emptyList()
     }
 
-    val listState = rememberLazyListState()
+    val listState = remember(conversationId) { androidx.compose.foundation.lazy.LazyListState() }
     var inputBarHeightPx by remember { mutableStateOf(0) }
-    val bottomAnchorIndex = maxOf(0, messages.size - 1)
+    val bottomAnchorIndex = messages.size
     val density = LocalDensity.current
     val bottomContentPadding = with(density) { inputBarHeightPx.toDp() } + 24.dp
 
     // 进入角色卡 / 新消息到达时，瞬间滚到底部（不用动画，避免长对话"超绝大滑动"）
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
+    LaunchedEffect(conversationId, messages.lastOrNull()?.id, inputBarHeightPx) {
+        if (messages.isNotEmpty() && inputBarHeightPx > 0) {
+            androidx.compose.runtime.withFrameNanos { }
             listState.scrollToItem(bottomAnchorIndex)
         }
     }
@@ -273,11 +288,15 @@ fun CharacterChatScreen(
     var showStorylineSheet by remember { mutableStateOf(false) }
     var activeEditorScreen by remember { mutableStateOf<CharacterEditorScreen?>(null) }
     var moreMenuExpanded by remember { mutableStateOf(false) }
+    var showPromptPreview by remember { mutableStateOf(false) }
+    var showContextLayers by remember { mutableStateOf(false) }
     var showInnerThoughtEntry by rememberSaveable { mutableStateOf(true) }
     val snackbarHostState = remember { SnackbarHostState() }
+    val screenScope = rememberCoroutineScope()
 
-    BackHandler(enabled = showSettingsSheet || showParameters || showSystemPrompt || showClearConfirm || moreMenuExpanded || showStorylineSheet) {
+    BackHandler(enabled = activeEditorScreen != null || showSettingsSheet || showParameters || showSystemPrompt || showClearConfirm || moreMenuExpanded || showStorylineSheet) {
         when {
+            activeEditorScreen != null -> activeEditorScreen = null
             showStorylineSheet -> showStorylineSheet = false
             moreMenuExpanded -> moreMenuExpanded = false
             showClearConfirm -> showClearConfirm = false
@@ -296,13 +315,15 @@ fun CharacterChatScreen(
     if (showClearConfirm) {
         AlertDialog(
             onDismissRequest = { showClearConfirm = false },
-            title = { Text("新建对话") },
-            text = { Text("将清空当前角色的聊天记录，角色卡配置不会受影响。") },
+            title = { Text("清空对话？") },
+            text = {
+                Text("将删除当前角色的用户消息和模型回复，恢复角色开场白，并重置好感度、信任度、接受度、关系阶段和关系时间线。角色卡配置不会受影响。此操作无法撤销。")
+            },
             confirmButton = {
                 TextButton(onClick = {
                     onClearHistory(character.id)
                     showClearConfirm = false
-                }) { Text("确定") }
+                }) { Text("确认清空", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
                 TextButton(onClick = { showClearConfirm = false }) { Text("取消") }
@@ -313,10 +334,12 @@ fun CharacterChatScreen(
     if (showParameters && conversation != null) {
         ParametersBottomSheet(
             conversation = conversation,
+            character = liveCharacter,
             uiState = uiState,
             onDismiss = { showParameters = false },
             onUpdateParameters = { model, temp, topP, maxTokens, ctxLimit ->
-                onUpdateConversationParameters(model, temp, topP, maxTokens, ctxLimit, conversation.id)
+                onSaveCharacter(liveCharacter.copy(modelId = model.orEmpty(), temperature = temp))
+                onUpdateConversationParameters(null, temp, topP, maxTokens, ctxLimit, conversation.id)
             },
             onEditSystemPrompt = {
                 showParameters = false
@@ -388,16 +411,36 @@ fun CharacterChatScreen(
         CharacterEditorScreen.CreativePreset -> {
             CharacterCreativePresetScreen(
                 characterName = liveCharacter.name,
+                title = "创作预设",
+                description = "这是 ${liveCharacter.name} 的独立创作预设，只对当前角色生效。其他角色拥有各自的文本和开关，不会被这里的修改覆盖。",
+                fieldLabel = "当前角色的创作预设文本",
+                enabled = characterCreativePresetEnabled,
+                affectsPersona = characterCreativePresetAffectsPersona,
+                presetText = characterCreativePresetText,
+                onBack = { activeEditorScreen = null },
+                onEnabledChange = { enabled ->
+                    onCharacterCreativePresetEnabledChange(liveCharacter.id, enabled)
+                },
+                onAffectsPersonaChange = { enabled ->
+                    onCharacterCreativePresetAffectsPersonaChange(liveCharacter.id, enabled)
+                },
+                onPresetTextChange = onCharacterCreativePresetTextChange
+            )
+            return
+        }
+
+        CharacterEditorScreen.BreakArmorPrompt -> {
+            CharacterCreativePresetScreen(
+                characterName = liveCharacter.name,
+                title = "破甲提示",
+                description = "打开后直接对当前角色启用内置破甲执行预设，无需填写额外文本。破甲执行时默认保留角色核心身份。",
+                fieldLabel = "全局破甲提示文本",
                 enabled = creativePresetEnabledForCharacter,
                 affectsPersona = creativePresetAffectsPersonaForCharacter,
                 presetText = creativePresetText,
                 onBack = { activeEditorScreen = null },
-                onEnabledChange = { enabled ->
-                    onCreativePresetEnabledChange(liveCharacter.id, enabled)
-                },
-                onAffectsPersonaChange = { enabled ->
-                    onCreativePresetAffectsPersonaChange(liveCharacter.id, enabled)
-                },
+                onEnabledChange = { enabled -> onCreativePresetEnabledChange(liveCharacter.id, enabled) },
+                onAffectsPersonaChange = { enabled -> onCreativePresetAffectsPersonaChange(liveCharacter.id, enabled) },
                 onPresetTextChange = onCreativePresetTextChange
             )
             return
@@ -464,21 +507,14 @@ fun CharacterChatScreen(
                         }
                         DropdownMenu(expanded = moreMenuExpanded, onDismissRequest = { moreMenuExpanded = false }) {
                             DropdownMenuItem(
-                                text = { Text(stringResource(R.string.character_regenerate)) },
+                                text = { Text("清空对话", color = MaterialTheme.colorScheme.error) },
                                 onClick = {
                                     moreMenuExpanded = false
-                                    val lastAssistant = messages.firstOrNull { it.role == "assistant" && it.id > 0L && it.id != Long.MIN_VALUE }
-                                    if (lastAssistant != null) onRegenerateMessage(lastAssistant) else onRetryLastUserMessage()
+                                    showClearConfirm = true
                                 },
-                                leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.character_retract_last)) },
-                                onClick = {
-                                    moreMenuExpanded = false
-                                    onDeleteLastRound(conversationId)
-                                },
-                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = null) }
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                                }
                             )
                             if (onGenerateSceneImage != null) {
                                 DropdownMenuItem(
@@ -495,13 +531,37 @@ fun CharacterChatScreen(
                             }
                             HorizontalDivider()
                             DropdownMenuItem(
+                                text = { Text("查看最终 Prompt") },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    showPromptPreview = true
+                                    onRefreshPromptPreview()
+                                },
+                                leadingIcon = { Icon(Icons.Filled.ContentCopy, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("上下文层") },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    showContextLayers = true
+                                },
+                                leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("模型设定") },
-                                onClick = { moreMenuExpanded = false; showSettingsSheet = true },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    if (conversation != null) showParameters = true
+                                    else screenScope.launch { snackbarHostState.showSnackbar("角色对话正在初始化") }
+                                },
                                 leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) }
                             )
                             DropdownMenuItem(
                                 text = { Text(creativePresetModeLabel) },
-                                onClick = { moreMenuExpanded = false; showSettingsSheet = true },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    activeEditorScreen = CharacterEditorScreen.BreakArmorPrompt
+                                },
                                 leadingIcon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null) }
                             )
                             DropdownMenuItem(
@@ -537,7 +597,15 @@ fun CharacterChatScreen(
                 .padding(innerPadding)
                 .imePadding()
         ) {
-            val maxBubbleWidth = maxWidth * 0.85f
+            val chatDisplay = LocalHanaChatDisplaySettings.current
+            val maxBubbleWidth = maxWidth * (chatDisplay.bubbleWidthPercent / 100f)
+            val densityMetrics = hanaChatDensityMetrics(chatDisplay.density)
+            val messageSpacing = densityMetrics.messageSpacing
+            val messageTextStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = when (chatDisplay.fontSize) {
+                "small" -> 14.sp
+                "large" -> 18.sp
+                else -> 16.sp
+            })
 
             ChatBackgroundArtwork(uiState.backgroundBitmap, backgroundIntensity)
 
@@ -649,42 +717,8 @@ fun CharacterChatScreen(
                         end = 16.dp,
                         bottom = bottomContentPadding
                     ),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(messageSpacing)
                 ) {
-                    item(key = "character-storyline-entry") {
-                        Surface(
-                            onClick = { showStorylineSheet = true },
-                            shape = RoundedCornerShape(20.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.88f),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Icon(
-                                    Icons.Filled.AutoAwesome,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(
-                                        text = "角色主线",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Text(
-                                        text = "点击查看好感度、信任感、接受度和关系时间线",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
-                    }
                     items(messages, key = { it.id }) { message ->
                         val isStreaming = message.id == Long.MIN_VALUE
                         val isGreeting = message.id == -1L && message.role == "assistant"
@@ -760,9 +794,11 @@ fun CharacterChatScreen(
                                     },
                                     thinkingDuration = if (isStreaming) null else message.thinkingDuration,
                                     streamingStartAt = if (isStreaming) uiState.streamingAssistant?.startedAt else null,
-                                    maxWidth = maxBubbleWidth,
-                                    bubbleColors = bubbleColors,
-                                    showInnerThoughtEntry = showInnerThoughtEntry,
+                                     maxWidth = maxBubbleWidth,
+                                     bubbleColors = bubbleColors,
+                                     speakerAvatarUrl = message.speakerCharacterId?.let(getCharacterById)?.avatarUrl ?: liveCharacter.avatarUrl,
+                                     showInnerThoughtEntry = showInnerThoughtEntry,
+                                     textStyle = messageTextStyle,
                                     onDeleteMessage = if (isGreeting) null else onDeleteMessage,
                                     onRegenerateMessage = if (isGreeting) null else onRegenerateMessage,
                                     onEditMessage = if (isGreeting) null else onEditMessage,
@@ -817,9 +853,13 @@ fun CharacterChatScreen(
                 Surface(
                     onClick = {
                         showSettingsSheet = false
-                        messages.firstOrNull { it.role == "assistant" && it.id != -1L && it.id != Long.MIN_VALUE }
-                            ?.let { onRegenerateMessage(it) }
-                            ?: onRetryLastUserMessage()
+                        val target = messages.lastOrNull { assistant ->
+                            assistant.role == "assistant" && assistant.id > 0L && messages.any { user ->
+                                user.role == "user" && (user.timestamp < assistant.timestamp || user.timestamp == assistant.timestamp && user.id < assistant.id)
+                            }
+                        }
+                        if (target != null) onRegenerateMessage(target)
+                        else screenScope.launch { snackbarHostState.showSnackbar("还没有可重新生成的回复") }
                     },
                     shape = RoundedCornerShape(14.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
@@ -837,7 +877,7 @@ fun CharacterChatScreen(
                 Surface(
                     onClick = {
                         showSettingsSheet = false
-                        onDeleteLastRound(conversationId)
+                        showClearConfirm = true
                     },
                     shape = RoundedCornerShape(14.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
@@ -849,7 +889,7 @@ fun CharacterChatScreen(
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
                         Spacer(modifier = Modifier.width(12.dp))
-                        Text(stringResource(R.string.character_retract_last), color = MaterialTheme.colorScheme.onSurface)
+                        Text("清空对话", color = MaterialTheme.colorScheme.onSurface)
                     }
                 }
 
@@ -907,7 +947,7 @@ fun CharacterChatScreen(
                     ) {
                         Icon(Icons.Filled.Wallpaper, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
                         Spacer(modifier = Modifier.width(12.dp))
-                        Text(stringResource(R.string.character_set_bg), color = MaterialTheme.colorScheme.onSurface)
+                        Text("设置背景", color = MaterialTheme.colorScheme.onSurface)
                     }
                 }
                 Surface(
@@ -925,7 +965,10 @@ fun CharacterChatScreen(
                     ) {
                         Icon(Icons.Filled.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
                         Spacer(modifier = Modifier.width(12.dp))
-                        Text(stringResource(R.string.character_clear_bg), color = MaterialTheme.colorScheme.onSurface)
+                        Column {
+                            Text("清除角色专属背景", color = MaterialTheme.colorScheme.onSurface)
+                            Text("清除后恢复全局背景", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 }
                 Surface(
@@ -982,6 +1025,35 @@ fun CharacterChatScreen(
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text("创作预设", color = MaterialTheme.colorScheme.onSurface)
                             Text(
+                                if (characterCreativePresetEnabled) {
+                                    "当前角色：${if (characterCreativePresetAffectsPersona) "允许影响人格" else "保留核心身份"}"
+                                } else {
+                                    "当前角色：未启用"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                Surface(
+                    onClick = {
+                        showSettingsSheet = false
+                        activeEditorScreen = CharacterEditorScreen.BreakArmorPrompt
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Filled.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("破甲提示", color = MaterialTheme.colorScheme.onSurface)
+                            Text(
                                 "当前角色：$creativePresetModeDescription",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1021,7 +1093,7 @@ fun CharacterChatScreen(
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("新建对话", color = MaterialTheme.colorScheme.error)
+                    Text("重置当前对话", color = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -1031,10 +1103,39 @@ fun CharacterChatScreen(
         CharacterStorylineSheet(
             character = liveCharacter,
             conversation = conversation,
+            effectiveModel = liveCharacter.modelId.takeIf { it.isNotBlank() }
+                ?: conversation?.modelName?.takeIf { it.isNotBlank() }
+                ?: uiState.selectedModel.ifBlank { "未设置" },
             messages = messages,
             savedState = getCharacterStoryState(liveCharacter.id),
             logs = getCharacterStoryLogs(liveCharacter.id),
+            onSaveRelationshipAnchor = { label, baseline ->
+                onUpdateRelationshipAnchor(liveCharacter.id, label, baseline)
+            },
+            onRestoreAutomaticRelationshipAnchor = {
+                onRestoreAutomaticRelationshipAnchor(liveCharacter.id)
+            },
             onDismiss = { showStorylineSheet = false }
+        )
+    }
+
+    if (showPromptPreview) {
+        PromptPreviewDialog(
+            state = promptPreviewState,
+            onRefresh = onRefreshPromptPreview,
+            onDismiss = { showPromptPreview = false }
+        )
+    }
+    if (showContextLayers && conversation != null) {
+        CharacterContextLayersDialog(
+            conversation = conversation,
+            onDismiss = { showContextLayers = false },
+            onSave = { worldInfo, authorNote ->
+                onUpdateContextLayers(conversation.id, worldInfo, authorNote)
+                showContextLayers = false
+            },
+            onSummarize = { onSummarizeHistory(conversation.id) },
+            onClearSummary = { onClearHistorySummary(conversation.id) }
         )
     }
 
@@ -1053,11 +1154,15 @@ fun CharacterChatScreen(
 private fun CharacterStorylineSheet(
     character: CharacterCardEntity,
     conversation: ConversationEntity?,
+    effectiveModel: String,
     messages: List<ChatMessageEntity>,
     savedState: CharacterStoryState,
     logs: List<CharacterStoryLogEntry>,
+    onSaveRelationshipAnchor: (String, Int) -> Unit,
+    onRestoreAutomaticRelationshipAnchor: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    var showRelationshipEditor by rememberSaveable { mutableStateOf(false) }
     val nonStreamingMessages = messages.filter { it.id > 0L }
     val userCount = nonStreamingMessages.count { it.role == "user" }
     val assistantCount = nonStreamingMessages.count { it.role == "assistant" }
@@ -1117,7 +1222,11 @@ private fun CharacterStorylineSheet(
                 StatusPill("好感度", "$affection / 100")
                 StatusPill("信任感", "$trust / 100")
                 StatusPill("接受度", "$acceptance / 100")
-                StatusPill("关系锚点", savedState.relationshipAnchor)
+                StatusPill(
+                    "关系锚点",
+                    savedState.relationshipAnchor + if (savedState.relationshipAnchorLocked) "（已锁定）" else "",
+                    onClick = { showRelationshipEditor = true }
+                )
                 StatusPill("亲密基线", "${savedState.intimacyBaseline} / 100")
                 StatusPill("升温势能", "${savedState.relationshipMomentum} / 100")
                 StatusPill("角色状态", relationshipStage)
@@ -1134,13 +1243,11 @@ private fun CharacterStorylineSheet(
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("最近关键互动", fontWeight = FontWeight.SemiBold)
                         Text(savedState.recentEventSummary, style = MaterialTheme.typography.bodySmall)
-                        if (conversation != null) {
-                            Text(
-                                "当前使用模型：${conversation.modelName ?: "跟随全局"}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        Text(
+                            "当前使用模型：$effectiveModel",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -1175,11 +1282,99 @@ private fun CharacterStorylineSheet(
             }
         }
     }
+    if (showRelationshipEditor) {
+        RelationshipAnchorDialog(
+            currentLabel = savedState.relationshipAnchor,
+            currentBaseline = savedState.intimacyBaseline,
+            onDismiss = { showRelationshipEditor = false },
+            onSave = { label, baseline ->
+                onSaveRelationshipAnchor(label, baseline)
+                showRelationshipEditor = false
+            },
+            onRestoreAutomatic = {
+                onRestoreAutomaticRelationshipAnchor()
+                showRelationshipEditor = false
+            }
+        )
+    }
 }
 
 @Composable
-private fun StatusPill(title: String, value: String) {
+private fun CharacterContextLayersDialog(
+    conversation: ConversationEntity,
+    onDismiss: () -> Unit,
+    onSave: (String, String) -> Unit,
+    onSummarize: () -> Unit,
+    onClearSummary: () -> Unit
+) {
+    var worldInfo by remember(conversation.id, conversation.worldInfo) {
+        mutableStateOf(conversation.worldInfo.orEmpty())
+    }
+    var authorNote by remember(conversation.id, conversation.authorNote) {
+        mutableStateOf(conversation.authorNote.orEmpty())
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("角色上下文层") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "注入顺序：固定角色卡与主线 -> 世界信息 -> 历史摘要 -> 最近原文 -> 作者注释 -> 创作预设。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = worldInfo,
+                    onValueChange = { worldInfo = it },
+                    label = { Text("世界信息") },
+                    supportingText = { Text("长期稳定的世界规则、地点、组织和人物关系。") },
+                    minLines = 5,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = authorNote,
+                    onValueChange = { authorNote = it },
+                    label = { Text("作者注释") },
+                    supportingText = { Text("靠近本轮回复注入，适合当前场景节奏、视角和临时重点。") },
+                    minLines = 4,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text("当前历史摘要", fontWeight = FontWeight.SemiBold)
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        conversation.historySummary?.takeIf { it.isNotBlank() } ?: "尚未生成摘要",
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onSummarize) { Text("立即压缩旧历史") }
+                    TextButton(onClick = onClearSummary, enabled = !conversation.historySummary.isNullOrBlank()) {
+                        Text("清除摘要")
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(worldInfo, authorNote) }) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@Composable
+private fun StatusPill(title: String, value: String, onClick: (() -> Unit)? = null) {
     Surface(
+        onClick = { onClick?.invoke() },
+        enabled = onClick != null,
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.26f)
     ) {
@@ -1190,10 +1385,82 @@ private fun StatusPill(title: String, value: String) {
     }
 }
 
+private data class RelationshipAnchorPreset(val label: String, val baseline: Int)
+
+private val relationshipAnchorPresets = listOf(
+    RelationshipAnchorPreset("初识/陌生人", 0), RelationshipAnchorPreset("普通熟人", 5),
+    RelationshipAnchorPreset("朋友", 18), RelationshipAnchorPreset("挚友", 36),
+    RelationshipAnchorPreset("同学", 6), RelationshipAnchorPreset("同事", 6),
+    RelationshipAnchorPreset("室友", 14), RelationshipAnchorPreset("队友/搭档", 12),
+    RelationshipAnchorPreset("青梅竹马", 42), RelationshipAnchorPreset("暧昧对象", 26),
+    RelationshipAnchorPreset("恋人", 55), RelationshipAnchorPreset("未婚夫妻", 58),
+    RelationshipAnchorPreset("夫妻", 62), RelationshipAnchorPreset("前任", 18),
+    RelationshipAnchorPreset("兄妹", 24), RelationshipAnchorPreset("姐弟", 24),
+    RelationshipAnchorPreset("兄弟", 24), RelationshipAnchorPreset("姐妹", 24),
+    RelationshipAnchorPreset("家人/亲属", 24), RelationshipAnchorPreset("师生", 8),
+    RelationshipAnchorPreset("师徒", 16), RelationshipAnchorPreset("前后辈", 8),
+    RelationshipAnchorPreset("上司/下属", 8), RelationshipAnchorPreset("主仆", 10),
+    RelationshipAnchorPreset("宿主/寄宿者", 12), RelationshipAnchorPreset("契约关系", 14),
+    RelationshipAnchorPreset("竞争对手", -10), RelationshipAnchorPreset("敌人", -30),
+    RelationshipAnchorPreset("宿敌", -42), RelationshipAnchorPreset("死敌", -55)
+)
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun RelationshipAnchorDialog(
+    currentLabel: String,
+    currentBaseline: Int,
+    onDismiss: () -> Unit,
+    onSave: (String, Int) -> Unit,
+    onRestoreAutomatic: () -> Unit
+) {
+    var label by remember(currentLabel) { mutableStateOf(currentLabel) }
+    var baseline by remember(currentBaseline) { mutableStateOf(currentBaseline.toFloat()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("编辑关系标签") },
+        text = {
+            Column(
+                modifier = Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("选择预设后仍可修改为任意自定义标签。手动保存后将锁定，不再被自动分类覆盖。", style = MaterialTheme.typography.bodySmall)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    relationshipAnchorPresets.forEach { preset ->
+                        AssistChip(
+                            onClick = { label = preset.label; baseline = preset.baseline.toFloat() },
+                            label = { Text(preset.label) }
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    label = { Text("自定义关系标签") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text("亲密基线：${baseline.toInt()}", style = MaterialTheme.typography.bodySmall)
+                Slider(value = baseline, onValueChange = { baseline = it }, valueRange = -60f..80f)
+                TextButton(onClick = onRestoreAutomatic, modifier = Modifier.fillMaxWidth()) {
+                    Text("恢复自动识别")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(label.trim().ifBlank { "未知" }, baseline.toInt()) }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CharacterCreativePresetScreen(
     characterName: String,
+    title: String,
+    description: String,
+    fieldLabel: String,
     enabled: Boolean,
     affectsPersona: Boolean,
     presetText: String,
@@ -1203,10 +1470,11 @@ private fun CharacterCreativePresetScreen(
     onPresetTextChange: (String) -> Unit
 ) {
     var localPresetText by remember(presetText) { mutableStateOf(presetText) }
+    val isBreakArmor = title == "破甲提示"
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("创作预设", fontWeight = FontWeight.SemiBold) },
+                title = { Text(title, fontWeight = FontWeight.SemiBold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -1230,7 +1498,7 @@ private fun CharacterCreativePresetScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    "这里直接编辑创作预设文本，并控制当前角色是否使用它。你可以在角色扮演中途随时改文本或切换开关，下一轮回复就会按新状态生效，不会影响其他角色的开关。",
+                    description,
                     modifier = Modifier.padding(14.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1242,38 +1510,73 @@ private fun CharacterCreativePresetScreen(
                     onCheckedChange = onEnabledChange
                 )
                 Spacer(modifier = Modifier.width(12.dp))
-                Text("对角色 $characterName 启用创作预设", style = MaterialTheme.typography.bodyLarge)
+                Text("对角色 $characterName 启用$title", style = MaterialTheme.typography.bodyLarge)
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                androidx.compose.material3.Switch(
-                    checked = affectsPersona,
-                    onCheckedChange = onAffectsPersonaChange,
-                    enabled = enabled
+            if (isBreakArmor && enabled) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFFFF3CD),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            "破甲执行核心已启动",
+                            color = Color(0xFF664D03),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            "已直接启用内置预设，无需额外填写文本或选择是否影响人格。执行时保留角色核心身份，并统一处理剧情顺序、用户边界、动作重复和格式冲突。",
+                            color = Color(0xFF664D03),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+            if (!isBreakArmor) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.Switch(
+                        checked = affectsPersona,
+                        onCheckedChange = onAffectsPersonaChange,
+                        enabled = enabled
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("允许影响人格", style = MaterialTheme.typography.bodyLarge)
+                }
+                Text(
+                    text = when {
+                        !enabled -> "当前生效链路：模型 -> 角色卡 -> 输出"
+                        affectsPersona -> "当前生效链路：角色卡 -> $title 硬约束（可调整人格表现） -> 输出"
+                        else -> "当前生效链路：角色卡 -> $title 硬约束（保留核心身份） -> 输出"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.width(12.dp))
-                Text("允许影响人格", style = MaterialTheme.typography.bodyLarge)
+                OutlinedTextField(
+                    value = localPresetText,
+                    onValueChange = {
+                        localPresetText = it
+                        onPresetTextChange(it)
+                    },
+                    label = { Text(fieldLabel) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    minLines = 10
+                )
+            } else {
+                Text(
+                    text = if (enabled) {
+                        "当前生效链路：角色卡 -> 内置破甲执行核心（保留核心身份） -> 输出"
+                    } else {
+                        "当前生效链路：模型 -> 角色卡 -> 输出"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-            Text(
-                text = when {
-                    !enabled -> "当前生效链路：模型 -> 角色卡预设 -> 输出"
-                    affectsPersona -> "当前生效链路：模型 -> 全局创作预设（可影响人格） -> 角色卡预设 -> 输出"
-                    else -> "当前生效链路：模型 -> 全局创作预设（仅模型补充） -> 角色卡预设 -> 输出"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            OutlinedTextField(
-                value = localPresetText,
-                onValueChange = {
-                    localPresetText = it
-                    onPresetTextChange(it)
-                },
-                label = { Text("创作预设文本") },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                minLines = 10
-            )
         }
     }
 }
@@ -1424,27 +1727,46 @@ private fun CharacterMessageBubble(
     streamingStartAt: Long?,
     maxWidth: Dp,
     bubbleColors: com.hana.app.ui.theme.HanaBubbleColors,
+    speakerAvatarUrl: String,
     showInnerThoughtEntry: Boolean,
     onDeleteMessage: ((ChatMessageEntity) -> Unit)?,
     onRegenerateMessage: ((ChatMessageEntity) -> Unit)?,
     onEditMessage: ((ChatMessageEntity, String) -> Unit)?,
     onRetryLastUserMessage: () -> Unit,
     snackbarHostState: SnackbarHostState
+    ,textStyle: androidx.compose.ui.text.TextStyle
 ) {
     val isUser = message.role == "user"
+    val bubbleImages = LocalHanaBubbleImages.current
+    val chatDisplay = LocalHanaChatDisplaySettings.current
+    val densityMetrics = hanaChatDensityMetrics(chatDisplay.density)
     val isStreaming = message.id == Long.MIN_VALUE
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var menuExpanded by remember { mutableStateOf(false) }
     var editDialogOpen by remember { mutableStateOf(false) }
     var editValue by remember(message.id) { mutableStateOf(message.content) }
-    val innerThought = remember(message.content) { extractInnerThought(message.content) }
+    val parsedMessage = remember(message.content, message.speakerName) {
+        parseCharacterTaggedMessage(message.content, message.speakerName)
+    }
     var innerExpanded by remember(message.id) { mutableStateOf(false) }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
+        if (!isUser && chatDisplay.showAvatars) {
+            if (speakerAvatarUrl.isNotBlank()) {
+                CharacterAvatar(avatarUrl = speakerAvatarUrl, modifier = Modifier.size(30.dp))
+            } else {
+                Surface(shape = RoundedCornerShape(999.dp), color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(30.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text((message.speakerName ?: "H").take(1), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+        }
         Column(
             modifier = Modifier.widthIn(max = maxWidth),
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
@@ -1464,33 +1786,66 @@ private fun CharacterMessageBubble(
             }
             Box {
                 Surface(
-                    shape = RoundedCornerShape(16.dp),
+                    shape = if (isUser) {
+                        RoundedCornerShape(
+                            topStart = bubbleColors.userCorner,
+                            topEnd = bubbleColors.userCorner,
+                            bottomStart = bubbleColors.userCorner,
+                            bottomEnd = bubbleColors.userTailCorner
+                        )
+                    } else {
+                        RoundedCornerShape(bubbleColors.aiCorner)
+                    },
                     color = if (isUser) {
                         bubbleColors.userBubble
                     } else {
                         bubbleColors.aiBubble
                     },
-                    shadowElevation = if (isUser || isStreaming) 0.dp else 2.dp,
+                    shadowElevation = 0.dp,
                     modifier = Modifier
                         .animateContentSize()
                 ) {
-                    val rawText = stripInnerThought(message.content).ifBlank {
-                        if (!isUser && streamingStartAt != null) "..." else ""
+                    val bubbleImagePath = if (isUser) bubbleImages.userPath else bubbleImages.aiPath
+                    val bubbleImageFile = bubbleImagePath.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.isFile }
+                    if (bubbleImageFile != null) {
+                        NineSliceImage(
+                            path = bubbleImageFile.absolutePath,
+                            fixedEdgePercent = if (isUser) bubbleImages.userFixedEdgePercent else bubbleImages.aiFixedEdgePercent,
+                            modifier = Modifier.matchParentSize()
+                        )
+                        Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.26f)))
                     }
-                    val displayText = rawText
-                    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    Column(modifier = Modifier.padding(
+                        horizontal = densityMetrics.bubbleHorizontalPadding,
+                        vertical = densityMetrics.bubbleVerticalPadding
+                    )) {
                         val selectionColors = androidx.compose.foundation.text.selection.TextSelectionColors(
                             handleColor = if (isUser) Color.White else MaterialTheme.colorScheme.primary,
                             backgroundColor = if (isUser) Color.White.copy(alpha = 0.35f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
                         )
                         CompositionLocalProvider(LocalTextSelectionColors provides selectionColors) {
                             SelectionContainer {
-                            Text(
-                                text = displayText + if (isStreaming) "|" else "",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (isUser) bubbleColors.userBubbleOnSurface else bubbleColors.aiBubbleOnSurface
-                            )
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    val segments = parsedMessage.visibleSegments.ifEmpty {
+                                        listOf(CharacterVisibleSegment(message.speakerName, if (!isUser && streamingStartAt != null) "..." else ""))
+                                    }
+                                    segments.forEachIndexed { index, segment ->
+                                        Text(
+                                            text = segment.text + if (isStreaming && index == segments.lastIndex) "|" else "",
+                                             style = textStyle,
+                                            color = if (bubbleImageFile != null) Color.White else if (isUser) bubbleColors.userBubbleOnSurface else bubbleColors.aiBubbleOnSurface
+                                        )
+                                    }
+                                }
+                            }
                         }
+                        if (chatDisplay.showTime && !isStreaming) {
+                            Text(
+                                java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(message.timestamp)),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = (if (isUser) bubbleColors.userBubbleOnSurface else bubbleColors.aiBubbleOnSurface).copy(alpha = 0.62f),
+                                modifier = Modifier.align(Alignment.End)
+                            )
                         }
                         if (message.isError) {
                             TextButton(onClick = onRetryLastUserMessage, modifier = Modifier.align(Alignment.End)) {
@@ -1562,7 +1917,7 @@ private fun CharacterMessageBubble(
                 }
             }
 
-            if (!isUser && showInnerThoughtEntry && innerThought.isNotBlank()) {
+            if (!isUser && showInnerThoughtEntry && parsedMessage.innerThoughts.isNotEmpty()) {
                 Column(
                     modifier = Modifier.padding(top = 6.dp),
                     horizontalAlignment = Alignment.Start
@@ -1575,12 +1930,14 @@ private fun CharacterMessageBubble(
                             shape = RoundedCornerShape(16.dp),
                             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
                         ) {
-                            Text(
-                                text = innerThought.ifBlank { "这一句没有额外内心描写。" },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.padding(14.dp)
-                            )
+                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                parsedMessage.innerThoughts.forEach { thought ->
+                                    if (parsedMessage.innerThoughts.size > 1 || thought.characterName != message.speakerName) {
+                                        Text(thought.characterName ?: message.speakerName.orEmpty(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                    }
+                                    Text(thought.text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
+                                }
+                            }
                         }
                     }
                 }
@@ -1615,30 +1972,6 @@ private fun CharacterMessageBubble(
             }
         )
     }
-}
-
-private fun extractInnerThought(content: String): String {
-    val patterns = listOf(
-        Regex("<inner>(.*?)</inner>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
-        Regex("【内心】(.*?)(?:【/内心】|$)", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
-        Regex("（内心[:：](.*?)）", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
-        Regex("""\(内心[:：](.*?)\)""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-    )
-    return patterns
-        .flatMap { regex -> regex.findAll(content).map { it.groupValues[1].trim() }.toList() }
-        .filter { it.isNotBlank() }
-        .distinct()
-        .joinToString("\n\n")
-}
-
-private fun stripInnerThought(content: String): String {
-    val patterns = listOf(
-        Regex("<inner>.*?</inner>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
-        Regex("【内心】.*?(?:【/内心】|$)", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
-        Regex("（内心[:：].*?）", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
-        Regex("""\(内心[:：].*?\)""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-    )
-    return patterns.fold(content) { acc, regex -> acc.replace(regex, "") }.trim()
 }
 
 @Composable
@@ -1729,6 +2062,7 @@ private fun CharacterChatInputBar(
     onStop: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val chatDisplay = LocalHanaChatDisplaySettings.current
     val actionScale by animateFloatAsState(
         targetValue = if (isSending) 0.96f else 1f,
         animationSpec = tween(180),
@@ -1736,33 +2070,40 @@ private fun CharacterChatInputBar(
     )
 
     Surface(
-        shadowElevation = 4.dp,
-        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 0.dp, bottomEnd = 0.dp),
+        shadowElevation = 0.dp,
+        shape = RoundedCornerShape(0.dp),
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
         modifier = modifier
             .fillMaxWidth()
     ) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 8.dp, vertical = 6.dp)
+                .padding(horizontal = 8.dp, vertical = when (chatDisplay.inputBarSize) { "compact" -> 3.dp; "comfortable" -> 10.dp; else -> 6.dp })
                 .graphicsLayer {
                     scaleX = actionScale
                     scaleY = actionScale
                 },
             verticalAlignment = Alignment.CenterVertically
         ) {
-            OutlinedTextField(
-                value = value,
-                onValueChange = onValueChange,
-                placeholder = { Text("回复 ${characterName}...") },
-                enabled = !isSending,
-                maxLines = 5,
-                minLines = 1,
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(24.dp)
-            )
+            Box(modifier = Modifier.weight(1f)) {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    placeholder = { Text("回复 ${characterName}...") },
+                    enabled = !isSending,
+                    maxLines = when (chatDisplay.inputBarSize) { "compact" -> 3; "comfortable" -> 7; else -> 5 },
+                    minLines = when (chatDisplay.inputBarSize) { "comfortable" -> 3; "standard" -> 2; else -> 1 },
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = when (chatDisplay.fontSize) { "small" -> 14.sp; "large" -> 18.sp; else -> 16.sp }),
+                    modifier = Modifier
+                        .fillMaxWidth(chatDisplay.inputBarWidthPercent.coerceIn(70, 100) / 100f)
+                        .heightIn(min = when (chatDisplay.inputBarSize) { "compact" -> 52.dp; "comfortable" -> 92.dp; else -> 68.dp })
+                        .align(Alignment.Center),
+                    shape = RoundedCornerShape(24.dp)
+                )
+            }
             Spacer(modifier = Modifier.size(8.dp))
             if (isSending) {
                 IconButton(
@@ -1809,16 +2150,17 @@ private fun SmoothCharacterTriangleIcon(color: Color, modifier: Modifier = Modif
 @Composable
 private fun ParametersBottomSheet(
     conversation: ConversationEntity,
+    character: CharacterCardEntity,
     uiState: ChatUiState,
     onDismiss: () -> Unit,
     onUpdateParameters: (String?, Float, Float, Int, Int) -> Unit,
     onEditSystemPrompt: () -> Unit
 ) {
-    var modelValue by remember { mutableStateOf(conversation.modelName ?: uiState.selectedModel) }
-    var temperature by remember { mutableStateOf(conversation.temperature) }
+    var modelValue by remember { mutableStateOf(character.modelId.ifBlank { conversation.modelName ?: uiState.selectedModel }) }
+    var temperature by remember { mutableStateOf(character.temperature) }
     var topP by remember { mutableStateOf(conversation.topP) }
     var maxTokensText by remember { mutableStateOf(conversation.maxTokens.toString()) }
-    var contextLimit by remember { mutableStateOf(conversation.contextLimit) }
+    var contextLimit by remember { mutableStateOf(conversation.contextLimit.coerceIn(1, 120)) }
     var modelExpanded by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
@@ -1852,7 +2194,7 @@ private fun ParametersBottomSheet(
                     expanded = modelExpanded,
                     onDismissRequest = { modelExpanded = false }
                 ) {
-                    listOf(modelValue, uiState.selectedModel).distinct().filter { it.isNotBlank() }.forEach { model ->
+                    (uiState.modelList.map { it.name } + listOf(modelValue, uiState.selectedModel)).distinct().filter { it.isNotBlank() }.forEach { model ->
                         DropdownMenuItem(
                             text = { Text(model) },
                             onClick = {
@@ -1872,7 +2214,7 @@ private fun ParametersBottomSheet(
             OutlinedTextField(
                 value = maxTokensText,
                 onValueChange = { maxTokensText = it.filter(Char::isDigit).take(6) },
-                label = { Text("单次最大回复长度") },
+                label = { Text("单次最大回复长度（tokens）") },
                 modifier = Modifier.fillMaxWidth()
             )
             Text("值越大，角色单次回复越长，但生成时间和消耗也会更高。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1880,8 +2222,8 @@ private fun ParametersBottomSheet(
             Text("控制角色一次能记住多少轮最近对话。值越大，延续性更强。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Slider(
                 value = contextLimit.toFloat(),
-                onValueChange = { contextLimit = it.toInt().coerceIn(1, 999) },
-                valueRange = 1f..999f
+                onValueChange = { contextLimit = it.toInt().coerceIn(1, 120) },
+                valueRange = 1f..120f
             )
             Button(
                 onClick = onEditSystemPrompt,
@@ -1890,13 +2232,15 @@ private fun ParametersBottomSheet(
             ) {
                 Text("编辑系统提示词")
             }
+            Text("自定义系统提示词会覆盖默认角色系统提示词主体；动态角色锚点和输出规则仍会额外注入。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Button(
                 onClick = {
+                    val maxTokens = maxTokensText.toIntOrNull()?.coerceIn(256, 65536) ?: conversation.maxTokens
                     onUpdateParameters(
-                        modelValue,
+                        modelValue.trim().takeIf { it.isNotBlank() },
                         temperature,
                         topP,
-                        maxTokensText.toIntOrNull() ?: 8192,
+                        maxTokens,
                         contextLimit
                     )
                     onDismiss()

@@ -15,6 +15,7 @@ import com.hana.app.data.repository.ModelCacheRepository
 import com.hana.app.data.repository.ModelRepository
 import com.hana.app.data.remote.ModelService
 import com.hana.app.data.settings.SettingsRepository
+import com.hana.app.data.customization.CustomizationRepository
 import com.hana.app.manager.BackgroundManager
 import kotlin.system.exitProcess
 
@@ -32,6 +33,8 @@ class AppContainer(context: Context) {
     val settingsRepository: SettingsRepository by lazy {
         SettingsRepository(appContext)
     }
+
+    val customizationRepository: CustomizationRepository by lazy { CustomizationRepository(appContext) }
 
     val backgroundManager: BackgroundManager by lazy {
         BackgroundManager(appContext)

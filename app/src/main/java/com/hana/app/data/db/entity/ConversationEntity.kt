@@ -23,7 +23,25 @@ data class ConversationEntity(
     val maxTokens: Int = 8192,
     val contextLimit: Int = 36,
     val systemPrompt: String? = null,
+    val historySummary: String? = null,
+    val authorNote: String? = null,
+    val worldInfo: String? = null,
+    val groupScene: String? = null,
+    val groupSceneLocked: Boolean = false,
+    val summaryUpToMessageId: Long? = null,
     val totalTokens: Int = 0,
     val isPinned: Boolean = false,
     val isFavorite: Boolean = false
 )
+
+fun ConversationEntity.isStoryConversation(): Boolean =
+    characterId == null && conversationType == "normal" && title.startsWith("故事：")
+
+fun ConversationEntity.isGroupConversation(): Boolean =
+    conversationType == "group" || !participantCharacterIds.isNullOrBlank()
+
+fun ConversationEntity.isMainChatConversation(): Boolean =
+    characterId == null &&
+        conversationType == "normal" &&
+        !isGroupConversation() &&
+        !isStoryConversation()

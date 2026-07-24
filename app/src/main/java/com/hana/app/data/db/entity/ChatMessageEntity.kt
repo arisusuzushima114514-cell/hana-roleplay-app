@@ -17,12 +17,19 @@ import androidx.room.PrimaryKey
     ],
     indices = [Index("conversationId")]
 )
+@androidx.compose.runtime.Stable
 data class ChatMessageEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0L,
     val conversationId: String,
     val role: String,
     val speakerCharacterId: String? = null,
     val speakerName: String? = null,
+    val roundId: String? = null,
+    val turnIndex: Int? = null,
+    val replyToMessageId: Long? = null,
+    val replyToSpeakerCharacterId: String? = null,
+    val replyToSpeakerName: String? = null,
+    val replyToContent: String? = null,
     val content: String,
     val thinkingContent: String? = null,
     val thinkingDuration: Int? = null,

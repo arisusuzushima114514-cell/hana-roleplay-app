@@ -1,12 +1,6 @@
-package com.hana.app.viewmodel
+﻿package com.hana.app.viewmodel
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.LinearGradient
-import android.graphics.Paint
-import android.graphics.Rect
-import android.graphics.Shader
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
@@ -18,9 +12,14 @@ import androidx.lifecycle.viewModelScope
 import com.hana.app.data.api.ApiService
 import com.hana.app.data.api.AttachmentService
 import com.hana.app.data.api.models.StreamDelta
+import com.hana.app.data.api.models.IncompleteStreamException
+import com.hana.app.data.api.models.OutputTruncatedException
+import com.hana.app.data.api.models.UpstreamContentBlockedException
 import com.hana.app.data.db.entity.CharacterCardEntity
 import com.hana.app.data.db.entity.ChatMessageEntity
 import com.hana.app.data.db.entity.ConversationEntity
+import com.hana.app.data.db.entity.isMainChatConversation
+import com.hana.app.data.db.entity.isGroupConversation
 import com.hana.app.data.db.entity.SavedModelEntity
 import com.hana.app.data.db.entity.ModelInfo
 import com.hana.app.data.db.entity.MemoryScope
@@ -37,6 +36,8 @@ import com.hana.app.data.remote.ModelService
 import com.hana.app.data.settings.DEFAULT_QUICK_PHRASES
 import com.hana.app.data.settings.CharacterStoryState
 import com.hana.app.data.settings.CharacterStoryLogEntry
+import com.hana.app.data.settings.InterCharacterRelationState
+import com.hana.app.data.settings.interCharacterRelationKey
 import com.hana.app.data.settings.SettingsRepository
 import com.hana.app.manager.BackgroundManager
 import com.hana.app.manager.BackgroundTarget
@@ -59,26 +60,26 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CoroutineScope
 import okhttp3.OkHttpClient
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.io.ByteArrayOutputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.charset.StandardCharsets
-import java.util.zip.CRC32
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 private const val DEFAULT_CONVERSATION_TITLE = "新对话"
-private const val CHARACTER_STORY_REBUILD_VERSION = 3
+private const val CHARACTER_STORY_REBUILD_VERSION = 4
 
 @androidx.compose.runtime.Stable
 data class StreamingAssistantState(
+    val conversationId: String,
     val speakerCharacterId: String? = null,
     val speakerName: String? = null,
     val content: String = "",
@@ -86,6 +87,13 @@ data class StreamingAssistantState(
     val startedAt: Long = System.currentTimeMillis(),
     val firstContentAt: Long? = null,
     val firstResponseAt: Long? = null
+)
+
+@androidx.compose.runtime.Stable
+data class PromptPreviewState(
+    val messages: List<PromptPreviewMessage> = emptyList(),
+    val isLoading: Boolean = false,
+    val error: String? = null
 )
 
 private data class GroupReplyCandidate(
@@ -120,10 +128,17 @@ data class ChatUiState(
     val modelFavorites: List<ModelInfo> = emptyList(),
     val personaEnabled: Boolean = false,
     val personaPrompt: String = "",
+    val creativePresetText: String = "",
+    val characterCreativePresetEnabled: Map<String, Boolean> = emptyMap(),
+    val characterCreativePresetAffectsPersona: Map<String, Boolean> = emptyMap(),
+    val characterCreativePresetTexts: Map<String, String> = emptyMap(),
+    val characterIndependentCreativePresetEnabled: Map<String, Boolean> = emptyMap(),
+    val characterIndependentCreativePresetAffectsPersona: Map<String, Boolean> = emptyMap(),
     val streamEnabled: Boolean = true,
     val backgroundIntensity: String = "soft",
     val characterStoryStates: Map<String, com.hana.app.data.settings.CharacterStoryState> = emptyMap(),
-    val characterStoryLogs: Map<String, List<com.hana.app.data.settings.CharacterStoryLogEntry>> = emptyMap()
+    val characterStoryLogs: Map<String, List<com.hana.app.data.settings.CharacterStoryLogEntry>> = emptyMap(),
+    val interCharacterRelations: Map<String, InterCharacterRelationState> = emptyMap()
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -143,17 +158,27 @@ class ChatViewModel(
     private val selectedConversationId = MutableStateFlow<String?>(null)
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
+    private val _promptPreviewState = MutableStateFlow(PromptPreviewState())
+    val promptPreviewState: StateFlow<PromptPreviewState> = _promptPreviewState.asStateFlow()
     private val _scrollTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
     val scrollTrigger: SharedFlow<Unit> = _scrollTrigger.asSharedFlow()
     private val _error = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val errorFlow: SharedFlow<String> = _error.asSharedFlow()
+    private val _generationCompleted = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+    val generationCompleted: SharedFlow<Unit> = _generationCompleted.asSharedFlow()
     private var activeReplyJob: Job? = null
+    private val replyInFlight = AtomicBoolean(false)
+    private val activeSearchCall = AtomicReference<okhttp3.Call?>(null)
     private var speechAvailableChecked = false
     // 复用 OkHttpClient 避免每次搜索都新建线程池
     private val searchHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
         .build()
+    private val messageBuilder = ChatMessageBuilder(
+        conversationRepository, messageRepository, characterRepository,
+        settingsRepository, memoryRepository, attachmentService
+    )
 
     init {
         viewModelScope.launch {
@@ -179,11 +204,18 @@ class ChatViewModel(
                             modelSupportsTools = modelSupportsTools,
                             personaEnabled = settings.personaEnabled,
                             personaPrompt = settings.personaPrompt,
+                            creativePresetText = settings.creativePresetText,
+                            characterCreativePresetEnabled = settings.characterCreativePresetEnabled,
+                            characterCreativePresetAffectsPersona = settings.characterCreativePresetAffectsPersona,
+                            characterCreativePresetTexts = settings.characterCreativePresetTexts,
+                            characterIndependentCreativePresetEnabled = settings.characterIndependentCreativePresetEnabled,
+                            characterIndependentCreativePresetAffectsPersona = settings.characterIndependentCreativePresetAffectsPersona,
                             streamEnabled = settings.streamEnabled,
                             webSearchEnabled = settings.webSearchEnabled,
                             backgroundIntensity = settings.backgroundIntensity,
                             characterStoryStates = settings.characterStoryStates,
-                            characterStoryLogs = settings.characterStoryLogs
+                            characterStoryLogs = settings.characterStoryLogs,
+                            interCharacterRelations = settings.interCharacterRelations
                         )
                     }
                 } catch (e: Exception) {
@@ -237,7 +269,7 @@ class ChatViewModel(
                     val currentId = selectedConversationId.value
                     when {
                         currentId == null && conversations.isNotEmpty() -> {
-                            val mainConv = conversations.firstOrNull { it.characterId == null }
+                            val mainConv = conversations.firstOrNull { it.isMainChatConversation() }
                             if (mainConv != null) {
                                 selectConversation(mainConv.id)
                             } else {
@@ -246,7 +278,7 @@ class ChatViewModel(
                             }
                         }
                         currentId != null && conversations.none { it.id == currentId } -> {
-                            val mainConv = conversations.firstOrNull { it.characterId == null }
+                            val mainConv = conversations.firstOrNull { it.isMainChatConversation() }
                             if (mainConv != null) {
                                 selectConversation(mainConv.id)
                             } else {
@@ -326,11 +358,127 @@ class ChatViewModel(
         refreshBackground()
     }
 
+    fun updateCreativePresetSnapshot(characterId: String, text: String? = null, enabled: Boolean? = null, affectsPersona: Boolean? = null) {
+        _uiState.update { state ->
+            state.copy(
+                creativePresetText = text ?: state.creativePresetText,
+                characterCreativePresetEnabled = state.characterCreativePresetEnabled.toMutableMap().apply {
+                    enabled?.let { put(characterId, it) }
+                },
+                characterCreativePresetAffectsPersona = state.characterCreativePresetAffectsPersona.toMutableMap().apply {
+                    affectsPersona?.let { put(characterId, it) }
+                }
+            )
+        }
+    }
+
+    fun updateIndependentCreativePresetSnapshot(characterId: String, text: String? = null, enabled: Boolean? = null, affectsPersona: Boolean? = null) {
+        _uiState.update { state ->
+            state.copy(
+                characterCreativePresetTexts = state.characterCreativePresetTexts.toMutableMap().apply {
+                    text?.let { put(characterId, it) }
+                },
+                characterIndependentCreativePresetEnabled = state.characterIndependentCreativePresetEnabled.toMutableMap().apply {
+                    enabled?.let { put(characterId, it) }
+                },
+                characterIndependentCreativePresetAffectsPersona = state.characterIndependentCreativePresetAffectsPersona.toMutableMap().apply {
+                    affectsPersona?.let { put(characterId, it) }
+                }
+            )
+        }
+    }
+
+    fun refreshPromptPreview(conversationId: String? = _uiState.value.currentConversationId, characterId: String? = null) {
+        if (conversationId.isNullOrBlank()) {
+            _promptPreviewState.value = PromptPreviewState(error = "当前没有可预览的对话")
+            return
+        }
+        viewModelScope.launch {
+            _promptPreviewState.value = _promptPreviewState.value.copy(isLoading = true, error = null)
+            runCatching {
+                val conversation = conversationRepository.getById(conversationId)
+                    ?: error("对话不存在")
+                val settingsModel = settingsRepository.getSettings().selectedModel.takeIf { it.isNotBlank() }
+                val participants = if (ChatMessageBuilder.isGroupConversation(conversation)) {
+                    getConversationParticipants(conversation)
+                } else {
+                    emptyList()
+                }
+                val lastUserText = messageRepository.getMessages(conversationId)
+                    .lastOrNull { it.role == "user" }
+                    ?.let { decodeChatContent(it.content).text }
+                    .orEmpty()
+                val character = when {
+                    characterId != null -> characterRepository.getById(characterId)
+                    conversation.characterId != null -> characterRepository.getById(conversation.characterId)
+                    participants.isNotEmpty() -> chooseGroupReplyCharacters(conversation, participants, lastUserText)
+                        .firstOrNull()?.character
+                    else -> null
+                }
+                val effectiveModel = character?.modelId?.takeIf { it.isNotBlank() }
+                    ?: conversation.modelName?.takeIf { it.isNotBlank() }
+                    ?: _uiState.value.selectedModel.takeIf { it.isNotBlank() }
+                    ?: settingsModel
+                val overridePrompt = if (participants.isNotEmpty() && character != null) {
+                    messageBuilder.buildGroupCharacterPrompt(conversation, character, participants, ::getCharacterStoryState)
+                } else {
+                    null
+                }
+                val searchResultText = if (participants.isEmpty() && _uiState.value.webSearchEnabled) {
+                    val searchSettings = settingsRepository.getSettings()
+                    if (searchSettings.searchIndependentMode && searchSettings.searchProviderUrl.isNotBlank()) {
+                        performWebSearch(lastUserText, searchSettings.searchProviderUrl, searchSettings.searchProviderKey)
+                    } else null
+                } else null
+                messageBuilder.buildApiMessages(
+                    conversationId = conversationId,
+                    userText = lastUserText,
+                    effectiveModel = effectiveModel,
+                    overrideSystemPrompt = overridePrompt,
+                    webSearchEnabled = _uiState.value.webSearchEnabled,
+                    personaEnabled = _uiState.value.personaEnabled,
+                    personaPrompt = _uiState.value.personaPrompt,
+                    modelSupportsVision = _uiState.value.modelSupportsVision,
+                    hasVisionConfig = _uiState.value.hasVisionConfig,
+                    selectedModel = _uiState.value.selectedModel,
+                    characterStoryStates = _uiState.value.characterStoryStates,
+                    searchResultText = searchResultText,
+                    creativePresetCharacterId = character?.id,
+                    creativePresetTextOverride = _uiState.value.creativePresetText,
+                    creativePresetEnabledOverride = character?.id?.let {
+                        _uiState.value.characterCreativePresetEnabled[it]
+                    },
+                    creativePresetAffectsPersonaOverride = character?.id?.let {
+                        _uiState.value.characterCreativePresetAffectsPersona[it]
+                    },
+                    characterCreativePresetTextOverride = character?.id?.let {
+                        _uiState.value.characterCreativePresetTexts[it]
+                    },
+                    characterCreativePresetEnabledOverride = character?.id?.let {
+                        _uiState.value.characterIndependentCreativePresetEnabled[it]
+                    },
+                    characterCreativePresetAffectsPersonaOverride = character?.id?.let {
+                        _uiState.value.characterIndependentCreativePresetAffectsPersona[it]
+                    },
+                    groupViewerCharacterId = character?.id?.takeIf { participants.isNotEmpty() },
+                    maxOutputTokens = conversation.maxTokens
+                )
+            }.onSuccess(::publishPromptPreview)
+                .onFailure { error ->
+                    _promptPreviewState.value = PromptPreviewState(error = error.message ?: "预览生成失败")
+                }
+        }
+    }
+
+    private fun publishPromptPreview(messages: List<ApiService.ChatPayload>) {
+        _promptPreviewState.value = PromptPreviewState(messages = messageBuilder.buildPromptPreview(messages))
+    }
+
     fun returnToMainConversation() {
         viewModelScope.launch {
             val conversations = _uiState.value.conversations
             val mainConversationId = conversations
-                .firstOrNull { it.characterId == null }
+                .firstOrNull { it.isMainChatConversation() }
                 ?.id
                 ?: conversationRepository.createNormalConversation().id
             selectConversation(mainConversationId)
@@ -352,7 +500,7 @@ class ChatViewModel(
         style: String,
         length: String,
         modelName: String,
-        onCreated: () -> Unit = {}
+        onCreated: (String) -> Unit = {}
     ) {
         viewModelScope.launch {
             val safeTitle = title.ifBlank { "故事模拟" }
@@ -378,7 +526,7 @@ class ChatViewModel(
             }
             selectConversation(conversation.id)
             _uiState.update { it.copy(input = "以故事开场开始" ) }
-            onCreated()
+            onCreated(conversation.id)
         }
     }
 
@@ -421,25 +569,6 @@ class ChatViewModel(
         viewModelScope.launch {
             try {
                 val conversation = conversationRepository.createGroupConversation(uniqueCharacters)
-                val now = System.currentTimeMillis()
-                uniqueCharacters.take(3).forEachIndexed { index, character ->
-                    val greeting = character.greeting.trim()
-                    if (greeting.isNotBlank()) {
-                        messageRepository.insert(
-                            ChatMessageEntity(
-                                conversationId = conversation.id,
-                                role = "assistant",
-                                speakerCharacterId = character.id,
-                                speakerName = character.name,
-                                content = greeting,
-                                thinkingContent = null,
-                                thinkingDuration = null,
-                                timestamp = now + index
-                            )
-                        )
-                    }
-                }
-                refreshConversationLastMessage(conversation.id)
                 selectConversation(conversation.id)
                 onReady(conversation.id)
             } catch (e: Exception) {
@@ -485,19 +614,7 @@ class ChatViewModel(
                     appendLine()
                 }
                 }
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                    put(MediaStore.Downloads.MIME_TYPE, "text/markdown")
-                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                }
-                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("创建文件失败")
-                } else {
-                    val file = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName)
-                    android.net.Uri.fromFile(file)
-                }
-                context.contentResolver.openOutputStream(uri)?.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-                fileName
+                writeDownloadExport(context, fileName, "text/markdown", body.toByteArray(Charsets.UTF_8))
             }.onSuccess { onResult(true, it) }
              .onFailure { onResult(false, it.message.orEmpty()) }
         }
@@ -509,16 +626,15 @@ class ChatViewModel(
                 val bytes = context.contentResolver.openInputStream(uri)
                     ?.use { it.readBytes() }
                     ?: error("无法读取所选文件")
-                val character = characterRepository.importCharacterCardBytes(bytes)
-                // PNG角色卡：将PNG图片保存为本地头像，解决导入后头像空白的问题
-                val isPng = bytes.size >= 8 && bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte()
-                        && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
-                if (isPng && character.avatarUrl.isBlank()) {
+                val imported = characterRepository.importCharacterCard(bytes)
+                var character = imported.character
+                imported.embeddedAvatarBytes?.let { avatarBytes ->
                     val avatarDir = java.io.File(context.filesDir, "characters")
-                    avatarDir.mkdirs()
+                    require(avatarDir.exists() || avatarDir.mkdirs()) { "无法创建角色头像目录" }
                     val avatarFile = java.io.File(avatarDir, "${character.id}.png")
-                    avatarFile.writeBytes(bytes)
-                    characterRepository.save(character.copy(avatarUrl = avatarFile.absolutePath))
+                    avatarFile.writeBytes(avatarBytes)
+                    character = character.copy(avatarUrl = android.net.Uri.fromFile(avatarFile).toString())
+                    require(characterRepository.save(character)) { "角色卡已解析，但头像保存失败" }
                 }
                 character.name
             }.onSuccess { onResult(true, "已导入角色卡：$it") }
@@ -540,6 +656,8 @@ class ChatViewModel(
                     put("tags", character.tags)
                     put("modelId", character.modelId)
                     put("temperature", character.temperature)
+                    put("characterMode", character.characterMode)
+                    put("subCharacters", org.json.JSONObject(character.subCharactersJson).optJSONArray("profiles") ?: org.json.JSONArray())
                     put("createdAt", character.createdAt)
                     put("updatedAt", character.updatedAt)
                 }.toString(2)
@@ -556,11 +674,11 @@ class ChatViewModel(
         viewModelScope.launch {
             runCatching {
                 val character = characterRepository.getById(characterId) ?: error("角色不存在")
-                val cardJson = buildCharacterCardPayload(character).toString(2)
+                val cardJson = CharacterCardExporter.buildCharacterCardPayload(character).toString(2)
                 val coverBitmap = character.avatarUrl.takeIf { it.isNotBlank() }
                     ?.let { attachmentService.loadImageBitmap(it) }
-                    ?: buildDefaultCharacterCover(character)
-                val pngBytes = buildCharacterCardPngBytes(coverBitmap, cardJson)
+                    ?: CharacterCardExporter.buildDefaultCharacterCover(character)
+                val pngBytes = CharacterCardExporter.buildCharacterCardPngBytes(coverBitmap, cardJson)
                 context.contentResolver.openOutputStream(uri)?.use { stream ->
                     stream.write(pngBytes)
                 } ?: error("无法写入所选位置")
@@ -568,119 +686,6 @@ class ChatViewModel(
             }.onSuccess { onResult(true, "$it.png") }
                 .onFailure { onResult(false, it.message.orEmpty()) }
         }
-    }
-
-    private fun buildCharacterCardPayload(character: CharacterCardEntity): org.json.JSONObject {
-        return org.json.JSONObject().apply {
-            put("name", character.name)
-            put("description", character.description)
-            put("personality", character.userPersona)
-            put("scenario", character.description)
-            put("first_mes", character.greeting)
-            put("mes_example", "")
-            put("creator_notes", character.userPersona)
-            put("tags", org.json.JSONArray(parseTags(character.tags)))
-            put("metadata", org.json.JSONObject().apply {
-                put("source", "Hana")
-                put("id", character.id)
-                put("modelId", character.modelId)
-                put("temperature", character.temperature)
-            })
-            put("avatar", character.avatarUrl)
-            put("id", character.id)
-            put("createdAt", character.createdAt)
-            put("updatedAt", character.updatedAt)
-        }
-    }
-
-    private fun buildDefaultCharacterCover(character: CharacterCardEntity): Bitmap {
-        val bitmap = Bitmap.createBitmap(768, 1024, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        paint.shader = LinearGradient(
-            0f,
-            0f,
-            768f,
-            1024f,
-            intArrayOf(Color.parseColor("#7C4DFF"), Color.parseColor("#FF6F91"), Color.parseColor("#FFC75F")),
-            null,
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRect(0f, 0f, 768f, 1024f, paint)
-
-        val overlayPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(96, 12, 12, 20)
-        }
-        canvas.drawRect(40f, 700f, 728f, 944f, overlayPaint)
-
-        val namePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 72f
-            isFakeBoldText = true
-        }
-        val descPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(220, 255, 255, 255)
-            textSize = 34f
-        }
-        canvas.drawText(character.name.take(18), 72f, 800f, namePaint)
-        drawMultilineText(canvas, character.description.ifBlank { character.greeting }.take(120), descPaint, Rect(72, 830, 696, 920))
-        return bitmap
-    }
-
-    private fun drawMultilineText(canvas: Canvas, text: String, paint: Paint, bounds: Rect) {
-        if (text.isBlank()) return
-        val maxCharsPerLine = 18
-        val lines = text.chunked(maxCharsPerLine).take(3)
-        lines.forEachIndexed { index, line ->
-            canvas.drawText(line, bounds.left.toFloat(), bounds.top + paint.textSize * (index + 1), paint)
-        }
-    }
-
-    private fun buildCharacterCardPngBytes(bitmap: Bitmap, cardJson: String): ByteArray {
-        val pngStream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, pngStream)
-        val pngBytes = pngStream.toByteArray()
-        val charaPayload = android.util.Base64.encodeToString(cardJson.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
-        return insertTextChunkIntoPng(pngBytes, "chara", charaPayload)
-    }
-
-    private fun insertTextChunkIntoPng(pngBytes: ByteArray, keyword: String, value: String): ByteArray {
-        require(pngBytes.size > 12) { "PNG 数据无效" }
-        val output = ByteArrayOutputStream()
-        output.write(pngBytes, 0, 8)
-        var offset = 8
-        var inserted = false
-        while (offset < pngBytes.size) {
-            val length = ByteBuffer.wrap(pngBytes, offset, 4).order(ByteOrder.BIG_ENDIAN).int
-            val chunkTotal = length + 12
-            val chunkType = String(pngBytes, offset + 4, 4, StandardCharsets.ISO_8859_1)
-            output.write(pngBytes, offset, chunkTotal)
-            offset += chunkTotal
-            if (!inserted && chunkType == "IHDR") {
-                output.write(buildTextChunk(keyword, value))
-                inserted = true
-            }
-        }
-        return output.toByteArray()
-    }
-
-    private fun buildTextChunk(keyword: String, value: String): ByteArray {
-        val data = ByteArrayOutputStream().apply {
-            write(keyword.toByteArray(StandardCharsets.ISO_8859_1))
-            write(0)
-            write(value.toByteArray(StandardCharsets.ISO_8859_1))
-        }.toByteArray()
-        val type = "tEXt".toByteArray(StandardCharsets.ISO_8859_1)
-        val crc = CRC32().apply {
-            update(type)
-            update(data)
-        }.value.toInt()
-        return ByteArrayOutputStream().apply {
-            write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(data.size).array())
-            write(type)
-            write(data)
-            write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(crc).array())
-        }.toByteArray()
     }
 
     fun deleteConversation(conversationId: String) {
@@ -711,8 +716,11 @@ class ChatViewModel(
 
     fun clearAllMessagesOnly() {
         viewModelScope.launch {
-            messageRepository.deleteAll()
             val conversations = conversationRepository.getAll()
+            conversations.forEach { conversation ->
+                attachmentService.deleteAttachmentsForMessages(messageRepository.getMessages(conversation.id))
+            }
+            messageRepository.deleteAll()
             conversations.forEach { conversation ->
                 conversationRepository.updateLastMessage(conversation, null)
                 if (conversation.characterId != null) {
@@ -743,6 +751,9 @@ class ChatViewModel(
     ) {
         viewModelScope.launch {
             if (clearAllConversations) {
+                conversationRepository.getAll().forEach { conversation ->
+                    attachmentService.deleteAttachmentsForMessages(messageRepository.getMessages(conversation.id))
+                }
                 conversationRepository.deleteAll()
                 selectedConversationId.value = null
                 _uiState.update { it.copy(currentConversationId = null, messages = emptyList()) }
@@ -766,20 +777,7 @@ class ChatViewModel(
                 val payload = buildExportPayload()
                 val time = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
                 val fileName = "hana_backup_$time.json"
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                    put(MediaStore.Downloads.MIME_TYPE, "application/json")
-                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                }
-                val resolver = context.contentResolver
-                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("无法创建备份文件")
-                } else {
-                    val file = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName)
-                    android.net.Uri.fromFile(file)
-                }
-                resolver.openOutputStream(uri)?.use { it.write(payload.toByteArray(Charsets.UTF_8)) } ?: error("无法写入备份文件")
-                fileName
+                writeDownloadExport(context, fileName, "application/json", payload.toByteArray(Charsets.UTF_8))
             }.onSuccess { onResult(true, it) }
              .onFailure { onResult(false, it.message.orEmpty()) }
         }
@@ -818,15 +816,27 @@ class ChatViewModel(
                                 put("id", conversation.id)
                                 put("title", conversation.title)
                                 put("characterId", conversation.characterId)
+                                put("conversationType", conversation.conversationType)
+                                put("participantCharacterIds", conversation.participantCharacterIds)
+                                put("groupScene", conversation.groupScene)
+                                put("groupSceneLocked", conversation.groupSceneLocked)
                                 put(
                                     "messages",
                                     org.json.JSONArray().also { msgArray ->
                                         messages.forEach { msg ->
                                             msgArray.put(
-                                                org.json.JSONObject().apply {
-                                                    put("role", msg.role)
-                                                    put("content", msg.content)
-                                                }
+                                                        org.json.JSONObject().apply {
+                                                            put("role", msg.role)
+                                                            put("content", msg.content)
+                                                            put("speakerCharacterId", msg.speakerCharacterId)
+                                                            put("speakerName", msg.speakerName)
+                                                            put("roundId", msg.roundId)
+                                                            put("turnIndex", msg.turnIndex)
+                                                            put("replyToMessageId", msg.replyToMessageId)
+                                                            put("replyToSpeakerCharacterId", msg.replyToSpeakerCharacterId)
+                                                            put("replyToSpeakerName", msg.replyToSpeakerName)
+                                                            put("replyToContent", msg.replyToContent)
+                                                        }
                                             )
                                         }
                                     }
@@ -848,6 +858,8 @@ class ChatViewModel(
                         put("tags", character.tags)
                         put("modelId", character.modelId)
                         put("temperature", character.temperature)
+                        put("characterMode", character.characterMode)
+                        put("subCharacters", org.json.JSONObject(character.subCharactersJson).optJSONArray("profiles") ?: org.json.JSONArray())
                     })
                 }
             })
@@ -881,14 +893,67 @@ class ChatViewModel(
             put("settings", org.json.JSONObject().apply {
                 put("language", settings.language)
                 put("themeMode", settings.themeMode.value)
+                put("themePalette", settings.themePalette.value)
                 put("selectedModel", settings.selectedModel)
                 put("imageProviderId", settings.imageProviderId)
                 put("imageModelName", settings.imageModelName)
                 put("personaEnabled", settings.personaEnabled)
                 put("webSearchEnabled", settings.webSearchEnabled)
                 put("streamEnabled", settings.streamEnabled)
+                put("breakArmorPromptText", settings.creativePresetText)
+                put("breakArmorEnabledByCharacter", org.json.JSONObject(settings.characterCreativePresetEnabled))
+                put("breakArmorAffectsPersonaByCharacter", org.json.JSONObject(settings.characterCreativePresetAffectsPersona))
+                put("creativePresetTextByCharacter", org.json.JSONObject(settings.characterCreativePresetTexts))
+                put("creativePresetEnabledByCharacter", org.json.JSONObject(settings.characterIndependentCreativePresetEnabled))
+                put("creativePresetAffectsPersonaByCharacter", org.json.JSONObject(settings.characterIndependentCreativePresetAffectsPersona))
+            })
+            put("interCharacterRelations", org.json.JSONObject().also { relationRoot ->
+                settings.interCharacterRelations.forEach { (key, relation) ->
+                    relationRoot.put(key, org.json.JSONObject().apply {
+                        put("affinity", relation.affinity)
+                        put("rivalry", relation.rivalry)
+                        put("tension", relation.tension)
+                        put("relationLabel", relation.relationLabel)
+                        put("recentEvent", relation.recentEvent)
+                        put("updatedAt", relation.updatedAt)
+                    })
+                }
             })
         }.toString(2)
+    }
+
+    private fun writeDownloadExport(context: Context, fileName: String, mimeType: String, bytes: ByteArray): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = context.contentResolver
+            val uri = resolver.insert(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                    put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Hana")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+            ) ?: error("无法创建导出文件")
+            try {
+                resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: error("无法写入导出文件")
+                resolver.update(uri, ContentValues().apply {
+                    put(MediaStore.Downloads.IS_PENDING, 0)
+                }, null, null)
+                return uri.toString()
+            } catch (t: Throwable) {
+                resolver.delete(uri, null, null)
+                throw t
+            }
+        }
+
+        val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: java.io.File(context.filesDir, "downloads")
+        val directory = java.io.File(baseDir, "Hana").apply {
+            if (!exists() && !mkdirs()) error("无法创建应用下载目录")
+        }
+        val file = java.io.File(directory, fileName)
+        file.outputStream().use { it.write(bytes) }
+        return file.absolutePath
     }
 
     fun storageSummary(): Triple<Int, Int, Long> {
@@ -957,23 +1022,12 @@ class ChatViewModel(
                         }
                     }
                 }
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                    put(MediaStore.Downloads.MIME_TYPE, if (asMarkdown) "text/markdown" else "text/plain")
-                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                }
-                val resolver = context.contentResolver
-                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                        ?: error("Cannot create export file")
-                } else {
-                    val file = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName)
-                    android.net.Uri.fromFile(file)
-                }
-                resolver.openOutputStream(uri)?.use { output ->
-                    output.write(body.toByteArray(Charsets.UTF_8))
-                } ?: error("Cannot open export file")
-                fileName
+                writeDownloadExport(
+                    context,
+                    fileName,
+                    if (asMarkdown) "text/markdown" else "text/plain",
+                    body.toByteArray(Charsets.UTF_8)
+                )
             }.onSuccess { fileName ->
                 onResult(true, fileName)
             }.onFailure { throwable ->
@@ -985,15 +1039,18 @@ class ChatViewModel(
     fun deleteMessage(message: ChatMessageEntity) {
         if (message.id <= 0L) return
         viewModelScope.launch {
+            attachmentService.deleteAttachmentsForMessages(listOf(message))
             messageRepository.delete(message.id)
+            conversationRepository.clearHistorySummary(message.conversationId)
+            rebuildCharacterStoryStateAfterHistoryChange(message.conversationId)
             refreshConversationLastMessage(message.conversationId)
         }
     }
 
     fun regenerateAssistantMessage(message: ChatMessageEntity) {
-        if (message.id <= 0L || message.role != "assistant" || _uiState.value.isSending) return
-        viewModelScope.launch {
-            val conversation = conversationRepository.getById(message.conversationId) ?: return@launch
+        if (message.id <= 0L || message.role != "assistant" || !tryStartReply()) return
+        launchReplyJob reply@{
+            val conversation = conversationRepository.getById(message.conversationId) ?: return@reply
             val history = messageRepository.getMessages(message.conversationId)
             val latestUserMessage = history
                 .filter {
@@ -1001,14 +1058,21 @@ class ChatViewModel(
                         (it.timestamp == message.timestamp && it.id < message.id)
                 }
                 .lastOrNull { it.role == "user" }
-                ?: return@launch
+                ?: return@reply
 
-            messageRepository.deleteFrom(message)
-            refreshConversationLastMessage(message.conversationId)
             val decoded = decodeChatContent(latestUserMessage.content)
+            val replacementStoryState = conversation.characterId?.let { characterId ->
+                rebuildCharacterStoryStateFromHistory(
+                    messages = history.filter { it.id < message.id && !it.isError },
+                    character = characterRepository.getById(characterId)
+                )
+            }
             requestAssistantReply(
                 conversation = conversation,
-                userText = decoded.text.ifBlank { decoded.attachments.firstOrNull()?.name ?: "附件消息" }
+                userText = decoded.text.ifBlank { decoded.attachments.firstOrNull()?.name ?: "附件消息" },
+                historyUpToMessageId = message.id - 1L,
+                replaceFromAssistant = message,
+                replacementStoryState = replacementStoryState
             )
         }
     }
@@ -1018,6 +1082,8 @@ class ChatViewModel(
         if (message.id <= 0L || message.role != "user" || text.isBlank() || _uiState.value.isSending) return
         viewModelScope.launch {
             messageRepository.deleteFrom(message)
+            conversationRepository.clearHistorySummary(message.conversationId)
+            rebuildCharacterStoryStateAfterHistoryChange(message.conversationId)
             refreshConversationLastMessage(message.conversationId)
             selectConversation(message.conversationId)
             sendMessage(text)
@@ -1030,6 +1096,8 @@ class ChatViewModel(
         _uiState.update { it.copy(input = decoded.text) }
         viewModelScope.launch {
             messageRepository.deleteFrom(message)
+            conversationRepository.clearHistorySummary(message.conversationId)
+            rebuildCharacterStoryStateAfterHistoryChange(message.conversationId)
             refreshConversationLastMessage(message.conversationId)
             selectConversation(message.conversationId)
         }
@@ -1037,8 +1105,11 @@ class ChatViewModel(
 
     fun saveCharacter(character: CharacterCardEntity, onDone: () -> Unit = {}) {
         viewModelScope.launch(Dispatchers.IO) {
-            characterRepository.save(character)
-            withContext(Dispatchers.Main) { onDone() }
+            if (characterRepository.save(character)) {
+                withContext(Dispatchers.Main) { onDone() }
+            } else {
+                _error.emit("保存角色失败，请稍后重试")
+            }
         }
     }
 
@@ -1051,6 +1122,7 @@ class ChatViewModel(
                 messageRepository.deleteByConversation(conversation.id)
                 conversationRepository.delete(conversation.id)
             }
+            conversationRepository.removeCharacterFromGroups(character.id)
             characterRepository.delete(character)
             // 清除残留的好感度状态和日志
             settingsRepository.clearCharacterStoryState(character.id)
@@ -1060,7 +1132,9 @@ class ChatViewModel(
     fun clearCharacterChatHistory(characterId: String) {
         viewModelScope.launch {
             val conversation = conversationRepository.getByCharacterId(characterId) ?: return@launch
+            attachmentService.deleteAttachmentsForMessages(messageRepository.getMessages(conversation.id))
             messageRepository.deleteByConversation(conversation.id)
+            conversationRepository.clearHistorySummary(conversation.id)
             val character = characterRepository.getById(characterId)
             if (character != null && character.greeting.isNotBlank()) {
                 messageRepository.insert(
@@ -1073,9 +1147,10 @@ class ChatViewModel(
                     )
                 )
                 conversationRepository.updateLastMessage(conversation, character.greeting)
-                characterRepository.updateLastMessage(characterId, character.greeting)
+                characterRepository.resetLastMessage(characterId, character.greeting)
             } else {
                 conversationRepository.updateLastMessage(conversation, null)
+                characterRepository.resetLastMessage(characterId, "")
             }
             conversationRepository.rename(conversation, "新对话", isNamed = false)
             // 重置好感度到初始状态，清除旧日志
@@ -1101,29 +1176,37 @@ class ChatViewModel(
                 }
             }
             deletions.forEach { messageRepository.delete(it.id) }
+            conversationRepository.clearHistorySummary(conversationId)
+            rebuildCharacterStoryStateAfterHistoryChange(conversationId)
             refreshConversationLastMessage(conversationId)
         }
     }
 
     fun sendMessage(content: String = _uiState.value.input) {
         val text = content.trim()
-        if (text.isBlank() || _uiState.value.isSending) return
+        if (text.isBlank() || !tryStartReply(clearInput = true)) return
+        val requestedConversationId = _uiState.value.currentConversationId
 
-        activeReplyJob = viewModelScope.launch {
-            _uiState.update { it.copy(input = "") }
+        launchReplyJob {
+            sendMessageInternal(text, requestedConversationId)
+        }
+    }
 
+    private suspend fun sendMessageInternal(text: String, requestedConversationId: String?) {
             val decoded = decodeChatContent(text)
             val visibleText = decoded.text.trim()
             val previewText = visibleText.ifBlank { decoded.attachments.firstOrNull()?.name ?: "附件消息" }
 
-            val conversation = ensureConversationForSend()
+            val conversation = ensureConversationForSend(requestedConversationId)
             val conversationId = conversation.id
+            val roundId = if (ChatMessageBuilder.isGroupConversation(conversation)) UUID.randomUUID().toString() else null
             selectedConversationId.value = conversationId
             _uiState.update { it.copy(currentConversationId = conversationId) }
 
             messageRepository.insert(
                 ChatMessageEntity(
                     conversationId = conversationId, role = "user", speakerCharacterId = null, speakerName = null, content = text,
+                    roundId = roundId, turnIndex = if (roundId != null) 0 else null,
                     thinkingContent = null, thinkingDuration = null, timestamp = System.currentTimeMillis()
                 )
             )
@@ -1135,45 +1218,38 @@ class ChatViewModel(
                 conversation = conversation,
                 userText = previewText
             )
-        }
     }
 
     fun stopGeneration() {
         if (!_uiState.value.isSending) return
+        val streaming = _uiState.value.streamingAssistant
         apiService.cancelActiveStream()
+        activeSearchCall.getAndSet(null)?.cancel()
         activeReplyJob?.cancel()
         activeReplyJob = null
+        replyInFlight.set(false)
         viewModelScope.launch {
             try {
-                val conversationId = _uiState.value.currentConversationId
-                val conversation = if (conversationId != null) conversationRepository.getById(conversationId) else null
-                val streaming = _uiState.value.streamingAssistant
-                if (conversation != null && streaming != null) {
-                    val text = streaming.content.ifBlank { "已停止生成" }
-                    val thinkingDuration = (((streaming.firstContentAt ?: System.currentTimeMillis()) - streaming.startedAt) / 1000L)
-                        .toInt()
-                        .coerceAtLeast(0)
-                    messageRepository.insert(
-                        ChatMessageEntity(
-                            conversationId = conversation.id,
-                            role = "assistant",
-                            speakerCharacterId = streaming.speakerCharacterId,
-                            speakerName = streaming.speakerName,
-                            content = text,
-                            thinkingContent = streaming.thinkingContent.ifBlank { null },
-                            thinkingDuration = if (streaming.thinkingContent.isBlank()) null else thinkingDuration,
-                            timestamp = System.currentTimeMillis()
-                        )
+                if (streaming != null && streaming.content.isNotBlank()) {
+                    val stoppedConversation = conversationRepository.getById(streaming.conversationId) ?: return@launch
+                    saveIncompleteAssistant(
+                        conversation = stoppedConversation,
+                        character = (streaming.speakerCharacterId ?: stoppedConversation.characterId)
+                            ?.let { characterRepository.getById(it) },
+                        content = streaming.content,
+                        thinking = streaming.thinkingContent,
+                        requestStartAt = streaming.startedAt,
+                        tokenCount = null
                     )
-                    conversationRepository.updateLastMessage(conversation, text)
-                    if (conversation.characterId != null) {
-                        characterRepository.updateLastMessage(conversation.characterId, text)
-                    }
                 }
             } catch (e: Exception) {
                 Log.e("ChatVM", "stopGeneration save failed", e)
             } finally {
-                _uiState.update { it.copy(isSending = false, streamingAssistant = null) }
+                _uiState.update { state ->
+                    if (streaming == null || state.streamingAssistant?.conversationId == streaming.conversationId) {
+                        state.copy(isSending = false, streamingAssistant = null)
+                    } else state
+                }
             }
         }
     }
@@ -1222,25 +1298,30 @@ class ChatViewModel(
     }
 
     fun retryLastUserMessage() {
-        if (_uiState.value.isSending) return
-        viewModelScope.launch {
-            val conversationId = _uiState.value.currentConversationId ?: return@launch
-            val conversation = conversationRepository.getById(conversationId) ?: return@launch
-            val lastUser = messageRepository.getMessages(conversationId).lastOrNull { it.role == "user" } ?: return@launch
+        if (!tryStartReply()) return
+        launchReplyJob reply@{
+            val conversationId = _uiState.value.currentConversationId ?: return@reply
+            val conversation = conversationRepository.getById(conversationId) ?: return@reply
+            val lastUser = messageRepository.getMessages(conversationId).lastOrNull { it.role == "user" } ?: return@reply
+            messageRepository.deleteAfter(lastUser)
+            conversationRepository.clearHistorySummary(conversationId)
+            rebuildCharacterStoryStateAfterHistoryChange(conversationId)
+            refreshConversationLastMessage(conversationId)
             val decoded = decodeChatContent(lastUser.content)
             requestAssistantReply(conversation, decoded.text.ifBlank { decoded.attachments.firstOrNull()?.name ?: "附件消息" })
         }
     }
 
     fun retryFromUserMessage(message: ChatMessageEntity) {
-        if (_uiState.value.isSending || message.role != "user") return
-        viewModelScope.launch {
-            conversationRepository.getById(message.conversationId) ?: return@launch
+        if (message.role != "user" || !tryStartReply()) return
+        launchReplyJob reply@{
+            conversationRepository.getById(message.conversationId) ?: return@reply
             messageRepository.deleteFrom(message)
+            conversationRepository.clearHistorySummary(message.conversationId)
+            rebuildCharacterStoryStateAfterHistoryChange(message.conversationId)
             refreshConversationLastMessage(message.conversationId)
             selectConversation(message.conversationId)
-            val decoded = decodeChatContent(message.content)
-            sendMessage(decoded.text.ifBlank { decoded.attachments.firstOrNull()?.name ?: "附件消息" })
+            sendMessageInternal(message.content, message.conversationId)
         }
     }
 
@@ -1315,25 +1396,41 @@ class ChatViewModel(
             .sortedBy { it.timestamp }
         if (history.isEmpty()) {
             val character = getCharacterById(characterId)
-            settingsRepository.saveCharacterStoryState(characterId, deriveInitialCharacterStoryState(character))
+            val derived = deriveInitialCharacterStoryState(character)
+            val rebuilt = preserveLockedRelationshipAnchor(derived, currentState)
+            settingsRepository.saveCharacterStoryState(characterId, rebuilt)
             settingsRepository.saveCharacterStoryStateMigrationVersion(CHARACTER_STORY_REBUILD_VERSION)
             return
         }
 
-        val rebuiltState = rebuildCharacterStoryStateFromHistory(history)
+        val rebuiltState = rebuildCharacterStoryStateFromHistory(
+            messages = history,
+            character = characterRepository.getById(characterId),
+            preservedState = currentState
+        )
         settingsRepository.saveCharacterStoryState(characterId, rebuiltState)
         settingsRepository.saveCharacterStoryStateMigrationVersion(CHARACTER_STORY_REBUILD_VERSION)
     }
 
-    private fun rebuildCharacterStoryStateFromHistory(messages: List<ChatMessageEntity>): CharacterStoryState {
+    private fun rebuildCharacterStoryStateFromHistory(
+        messages: List<ChatMessageEntity>,
+        character: CharacterCardEntity? = null,
+        preservedState: CharacterStoryState? = null
+    ): CharacterStoryState {
         val firstMessage = messages.firstOrNull()
         val conversationId = firstMessage?.conversationId.orEmpty()
-        val character = _uiState.value.conversations.firstOrNull { it.id == conversationId }?.characterId?.let(::getCharacterById)
-        var state = deriveInitialCharacterStoryState(character)
+        val resolvedCharacter = character ?: _uiState.value.conversations
+            .firstOrNull { it.id == conversationId }
+            ?.characterId
+            ?.let(::getCharacterById)
+        var state = preserveLockedRelationshipAnchor(
+            deriveInitialCharacterStoryState(resolvedCharacter),
+            preservedState
+        )
         var roundCount = 0
         var pendingUser: ChatMessageEntity? = null
 
-        messages.forEach { message ->
+        messages.filter { !it.isError }.forEach { message ->
             when (message.role) {
                 "user" -> pendingUser = message
                 "assistant" -> {
@@ -1355,6 +1452,29 @@ class ChatViewModel(
         }
 
         return state
+    }
+
+    private suspend fun rebuildCharacterStoryStateAfterHistoryChange(conversationId: String) {
+        val conversation = conversationRepository.getById(conversationId) ?: return
+        val characterId = conversation.characterId ?: return
+        val history = messageRepository.getMessages(conversationId)
+            .filter { it.id > 0L }
+            .sortedWith(compareBy<ChatMessageEntity> { it.timestamp }.thenBy { it.id })
+        val preservedState = settingsRepository.getSettings().characterStoryStates[characterId]
+        settingsRepository.clearCharacterStoryState(characterId)
+        val rebuilt = if (history.isEmpty()) {
+            preserveLockedRelationshipAnchor(
+                deriveInitialCharacterStoryState(characterRepository.getById(characterId)),
+                preservedState
+            )
+        } else {
+            rebuildCharacterStoryStateFromHistory(
+                messages = history,
+                character = characterRepository.getById(characterId),
+                preservedState = preservedState
+            )
+        }
+        settingsRepository.saveCharacterStoryState(characterId, rebuilt)
     }
 
     fun saveCharacterStoryState(characterId: String, state: CharacterStoryState) {
@@ -1680,9 +1800,12 @@ class ChatViewModel(
 
     private suspend fun requestAssistantReply(
         conversation: ConversationEntity,
-        userText: String
+        userText: String,
+        historyUpToMessageId: Long? = null,
+        replaceFromAssistant: ChatMessageEntity? = null,
+        replacementStoryState: CharacterStoryState? = null
     ) {
-        if (isGroupConversation(conversation)) {
+        if (ChatMessageBuilder.isGroupConversation(conversation)) {
             requestGroupAssistantReplies(conversation, userText)
             return
         }
@@ -1692,7 +1815,7 @@ class ChatViewModel(
         _uiState.update {
             it.copy(
                 isSending = true,
-                streamingAssistant = StreamingAssistantState(startedAt = requestStartAt)
+                streamingAssistant = StreamingAssistantState(conversationId = conversationId, startedAt = requestStartAt)
             )
         }
 
@@ -1711,7 +1834,51 @@ class ChatViewModel(
                 ?: _uiState.value.selectedModel.takeIf { it.isNotBlank() }
                 ?: settingsModel
         }
-        val apiMessages = buildApiMessages(conversationId, userText, effectiveModel)
+        val searchResultText = if (_uiState.value.webSearchEnabled) {
+            val searchSettings = settingsRepository.getSettings()
+            if (searchSettings.searchIndependentMode && searchSettings.searchProviderUrl.isNotBlank()) {
+                performWebSearch(userText, searchSettings.searchProviderUrl, searchSettings.searchProviderKey)
+            } else null
+        } else null
+        if (historyUpToMessageId == null) {
+            refreshHistorySummaryIfNeeded(latestConversation, effectiveModel)
+        }
+        val apiMessages = messageBuilder.buildApiMessages(
+            conversationId = conversationId,
+            userText = userText,
+            effectiveModel = effectiveModel,
+            webSearchEnabled = _uiState.value.webSearchEnabled,
+            personaEnabled = _uiState.value.personaEnabled,
+            personaPrompt = _uiState.value.personaPrompt,
+            modelSupportsVision = _uiState.value.modelSupportsVision,
+            hasVisionConfig = _uiState.value.hasVisionConfig,
+            selectedModel = _uiState.value.selectedModel,
+            characterStoryStates = replacementStoryState?.let { state ->
+                val characterId = latestConversation.characterId
+                if (characterId == null) _uiState.value.characterStoryStates
+                else _uiState.value.characterStoryStates + (characterId to state)
+            } ?: _uiState.value.characterStoryStates,
+            searchResultText = searchResultText,
+            creativePresetTextOverride = _uiState.value.creativePresetText,
+            creativePresetEnabledOverride = latestConversation.characterId?.let {
+                _uiState.value.characterCreativePresetEnabled[it]
+            },
+            creativePresetAffectsPersonaOverride = latestConversation.characterId?.let {
+                _uiState.value.characterCreativePresetAffectsPersona[it]
+            },
+            characterCreativePresetTextOverride = latestConversation.characterId?.let {
+                _uiState.value.characterCreativePresetTexts[it]
+            },
+            characterCreativePresetEnabledOverride = latestConversation.characterId?.let {
+                _uiState.value.characterIndependentCreativePresetEnabled[it]
+            },
+            characterCreativePresetAffectsPersonaOverride = latestConversation.characterId?.let {
+                _uiState.value.characterIndependentCreativePresetAffectsPersona[it]
+            },
+            historyUpToMessageId = historyUpToMessageId,
+            maxOutputTokens = latestConversation.maxTokens
+        )
+        publishPromptPreview(apiMessages)
 
         val effectiveTemperature = if (isCharacterChat && character != null && character.temperature > 0f) {
             character.temperature
@@ -1722,7 +1889,7 @@ class ChatViewModel(
             it.imageDataUrls.isNotEmpty() || it.fileTexts.isNotEmpty()
         }
 
-        val streamResult = if (_uiState.value.streamEnabled) {
+        suspend fun executeRequest() = if (_uiState.value.streamEnabled) {
             apiService.streamChat(
                 messages = apiMessages,
                 model = effectiveModel,
@@ -1733,7 +1900,7 @@ class ChatViewModel(
                 timeoutSeconds = _uiState.value.timeoutSeconds.toLong(),
                 webSearch = _uiState.value.webSearchEnabled,
                 onDelta = { delta ->
-                    appendStreamingDeltaGradually(requestStartAt, delta)
+                    appendStreamingDeltaGradually(conversationId, requestStartAt, delta)
                 }
             )
         } else {
@@ -1748,6 +1915,7 @@ class ChatViewModel(
                 webSearch = _uiState.value.webSearchEnabled
             ).onSuccess { result ->
                 appendStreamingDelta(
+                    conversationId = conversationId,
                     startAt = requestStartAt,
                     content = result.content,
                     reasoningContent = result.reasoningContent
@@ -1755,14 +1923,37 @@ class ChatViewModel(
             }
         }
 
+        var streamResult = executeRequest()
+        val firstAttemptContent = _uiState.value.streamingAssistant
+            ?.takeIf { it.conversationId == conversationId }
+            ?.content
+            ?.takeIf { it.isNotBlank() }
+            ?: streamResult.getOrNull()?.content.orEmpty()
+            .ifBlank { partialContentFromFailure(streamResult.exceptionOrNull()) }
+        val shouldRetryResponse = streamResult.isSuccess && firstAttemptContent.isBlank()
+        val shouldRetryFailure = firstAttemptContent.isBlank() &&
+            isRetryableGenerationFailure(streamResult.exceptionOrNull())
+        if (shouldRetryFailure || shouldRetryResponse) {
+            _uiState.update { state ->
+                state.copy(
+                    streamingAssistant = StreamingAssistantState(
+                        conversationId = conversationId,
+                        startedAt = requestStartAt
+                    )
+                )
+            }
+            delay(600L)
+            streamResult = executeRequest()
+        }
+
         if (streamResult.exceptionOrNull() is CancellationException) {
-            _uiState.update { it.copy(isSending = false, streamingAssistant = null) }
+            clearStreamingState(conversationId)
             return
         }
 
         streamResult.onSuccess { result ->
             try {
-                val streamingState = _uiState.value.streamingAssistant
+                val streamingState = _uiState.value.streamingAssistant?.takeIf { it.conversationId == conversationId }
                 val finalContent = streamingState?.content?.ifBlank { result.content } ?: result.content
                 val finalThinking = streamingState?.thinkingContent?.ifBlank {
                     result.reasoningContent
@@ -1778,7 +1969,7 @@ class ChatViewModel(
                     .filter { it.isNotBlank() }
                     .joinToString("\n\n")
 
-                val cleanContent = stripLeadingSpeakerPrefix(extractedThinking.content.trim(), character?.name)
+                val cleanContent = ChatMessageBuilder.stripLeadingSpeakerPrefix(extractedThinking.content.trim(), character?.name)
                 val cleanThinking = mergedThinking
 
                 if (cleanContent.isBlank()) {
@@ -1792,6 +1983,11 @@ class ChatViewModel(
                 } else {
                     val assistantText = cleanContent
                     val responseSavedAt = System.currentTimeMillis()
+                    if (replaceFromAssistant != null) {
+                        messageRepository.deleteFrom(replaceFromAssistant)
+                        conversationRepository.clearHistorySummary(conversationId)
+                        rebuildCharacterStoryStateAfterHistoryChange(conversationId)
+                    }
                     messageRepository.insert(
                         ChatMessageEntity(
                             conversationId = conversationId, role = "assistant",
@@ -1817,15 +2013,32 @@ class ChatViewModel(
                         autoNameConversation(updatedConversation, userText, assistantText)
                     }
                     updatedConversation.characterId?.let { characterId ->
+                        if (isMetaSafetyRefusal(assistantText)) return@let
                         val userRounds = messageRepository.countByRole(conversationId, "user")
                         val assistantRounds = messageRepository.countByRole(conversationId, "assistant")
                         val totalRounds = minOf(userRounds, assistantRounds)
+                        val knownOtherCharacters = _uiState.value.characters.filterNot { it.id == characterId }
+                        val conversationHistory = messageRepository.getMessages(conversationId)
+                        val cardRoleNames = character?.let {
+                            messageBuilder.resolveSingleCardRoleNames(it, conversationHistory)
+                        }.orEmpty()
+                        val publicSpeakers = ChatMessageBuilder.extractNamedPublicSpeakers(
+                            assistantText,
+                            cardRoleNames
+                        )
                         val progress = advanceCharacterStoryState(
-                            previous = getCharacterStoryState(characterId),
+                            previous = replacementStoryState ?: getCharacterStoryState(characterId),
                             userText = userText,
                             assistantText = assistantText,
                             assistantInnerThought = cleanThinking,
                             rounds = totalRounds,
+                            directInteractionAllowed = isDirectInteractionFor(
+                                characterId = characterId,
+                                otherCharacters = knownOtherCharacters,
+                                userText = userText
+                            ),
+                            otherCharacterNames = knownOtherCharacters.map { it.name },
+                            roleInteractionOnly = cardRoleNames.size >= 2 && publicSpeakers.size != 1,
                             timestamp = responseSavedAt
                         )
                         settingsRepository.saveCharacterStoryState(characterId, progress.state)
@@ -1844,8 +2057,11 @@ class ChatViewModel(
                             )
                         }
                     }
-                    if (updatedConversation.characterId == null) {
+                    if (updatedConversation.isMainChatConversation()) {
                         extractMainMemory(userText, conversationId)
+                    }
+                    breakArmorOutputDiagnostic(updatedConversation.characterId, assistantText)?.let { warning ->
+                        _error.emit(warning)
                     }
                 }
             } catch (e: Exception) {
@@ -1853,28 +2069,263 @@ class ChatViewModel(
                 _error.emit("回复已生成，但后处理失败: ${e.message.orEmpty().take(80)}")
             }
         }.onFailure { throwable ->
-            _error.emit("发送失败: ${throwable.message.orEmpty().take(80)}")
+            val streamingPartial = _uiState.value.streamingAssistant
+                ?.takeIf { it.conversationId == conversationId }
+            val failurePartial = partialResultFromFailure(throwable)
+            val visiblePartial = streamingPartial?.content?.takeIf { it.isNotBlank() }
+                ?: failurePartial?.content.orEmpty()
+            if (visiblePartial.isNotBlank()) {
+                saveIncompleteAssistant(
+                    conversation = conversation,
+                    character = character,
+                    content = visiblePartial,
+                    thinking = streamingPartial?.thinkingContent?.takeIf { it.isNotBlank() }
+                        ?: failurePartial?.reasoningContent.orEmpty(),
+                    requestStartAt = requestStartAt,
+                    tokenCount = failurePartial?.totalTokens
+                )
+            }
+            _error.emit(formatChatFailure(throwable))
         }
 
-        _uiState.update {
-            it.copy(
-                isSending = false,
-                streamingAssistant = null
+        clearStreamingState(conversationId)
+    }
+
+    fun updateRelationshipAnchor(characterId: String, anchor: String, intimacyBaseline: Int) {
+        val updated = getCharacterStoryState(characterId).copy(
+            relationshipAnchor = anchor.trim().ifBlank { "未知" },
+            relationshipAnchorLocked = true,
+            intimacyBaseline = intimacyBaseline.coerceIn(-100, 100)
+        )
+        _uiState.update { state ->
+            state.copy(characterStoryStates = state.characterStoryStates + (characterId to updated))
+        }
+        viewModelScope.launch { settingsRepository.saveCharacterStoryState(characterId, updated) }
+    }
+
+    fun restoreAutomaticRelationshipAnchor(characterId: String) {
+        val derived = deriveInitialCharacterStoryState(getCharacterById(characterId))
+        val current = getCharacterStoryState(characterId)
+        val updated = current.copy(
+            relationshipAnchor = derived.relationshipAnchor,
+            relationshipAnchorLocked = false,
+            intimacyBaseline = derived.intimacyBaseline
+        )
+        _uiState.update { state ->
+            state.copy(characterStoryStates = state.characterStoryStates + (characterId to updated))
+        }
+        viewModelScope.launch { settingsRepository.saveCharacterStoryState(characterId, updated) }
+    }
+
+    private fun preserveLockedRelationshipAnchor(
+        derived: CharacterStoryState,
+        preserved: CharacterStoryState?
+    ): CharacterStoryState {
+        if (preserved?.relationshipAnchorLocked != true) return derived
+        return derived.copy(
+            relationshipAnchor = preserved.relationshipAnchor,
+            relationshipAnchorLocked = true,
+            intimacyBaseline = preserved.intimacyBaseline
+        )
+    }
+
+    fun updateConversationContextLayers(
+        conversationId: String,
+        worldInfo: String,
+        authorNote: String
+    ) {
+        viewModelScope.launch {
+            conversationRepository.updateWorldInfo(conversationId, worldInfo)
+            conversationRepository.updateAuthorNote(conversationId, authorNote)
+        }
+    }
+
+    fun updateGroupScene(conversationId: String, scene: String, locked: Boolean) {
+        viewModelScope.launch {
+            conversationRepository.updateGroupScene(conversationId, scene, locked)
+        }
+    }
+
+    fun clearConversationHistorySummary(conversationId: String) {
+        viewModelScope.launch {
+            conversationRepository.clearHistorySummary(conversationId)
+            _error.emit("历史摘要已清除，将从保留的原始消息重新生成")
+        }
+    }
+
+    fun summarizeConversationNow(conversationId: String) {
+        viewModelScope.launch {
+            val conversation = conversationRepository.getById(conversationId) ?: return@launch
+            val effectiveModel = conversation.modelName?.takeIf { it.isNotBlank() }
+                ?: _uiState.value.selectedModel.takeIf { it.isNotBlank() }
+            val before = conversation.summaryUpToMessageId
+            refreshHistorySummaryIfNeeded(conversation, effectiveModel, force = true)
+            val updated = conversationRepository.getById(conversationId)
+            _error.emit(
+                if (updated?.summaryUpToMessageId != before) "历史摘要已更新" else "当前没有需要压缩的旧消息"
             )
         }
     }
 
-    private suspend fun ensureConversationForSend(): ConversationEntity {
-        val currentId = _uiState.value.currentConversationId
+    private suspend fun refreshHistorySummaryIfNeeded(
+        conversation: ConversationEntity,
+        effectiveModel: String?,
+        force: Boolean = false
+    ) {
+        val history = messageRepository.getMessages(conversation.id)
+            .filter { !it.isError && (it.role == "user" || it.role == "assistant") }
+        val summaryThreshold = settingsRepository.getSettings().autoSummaryThreshold.coerceIn(4, 500)
+        if (!force && history.size < summaryThreshold) return
+        val keepRecentRounds = conversation.contextLimit.coerceIn(1, 120)
+        val cutoffIndex = splitIndexForRecentUserRounds(history.map { it.role }, keepRecentRounds)
+        if (cutoffIndex <= 0) return
+        val summarizable = history.take(cutoffIndex)
+            .filter { it.id > (conversation.summaryUpToMessageId ?: 0L) }
+        val batchIndexes = selectSummaryBatchIndexes(
+            contentLengths = summarizable.map { decodeChatContent(it.content).text.length + 16 },
+            charBudget = 24_000
+        ) ?: return
+        val selectedForSummary = summarizable.slice(batchIndexes)
+        val lastCovered = selectedForSummary.lastOrNull() ?: return
+        val cardCharacter = conversation.characterId?.let { characterRepository.getById(it) }
+        val cardRoleNames = cardCharacter?.let {
+            messageBuilder.resolveSingleCardRoleNames(it, selectedForSummary)
+        }.orEmpty()
+        val transcript = selectedForSummary.joinToString("\n") { message ->
+            val content = ChatMessageBuilder.publicGroupContent(
+                decodeChatContent(message.content).text
+            ).trim()
+            if (message.role == "user") {
+                "[message role=user]\n$content"
+            } else {
+                val owner = message.speakerName?.takeIf { it.isNotBlank() }
+                    ?: cardCharacter?.name
+                    ?: "角色卡"
+                val publicSpeakers = ChatMessageBuilder.extractNamedPublicSpeakers(content, cardRoleNames)
+                val actualSpeakers = publicSpeakers.takeIf { it.isNotEmpty() }
+                    ?.joinToString("|")
+                    ?: "未确认"
+                "[message role=assistant owner=\"$owner\" publicSpeakers=\"$actualSpeakers\"]\n$content"
+            }
+        }
+        if (transcript.isBlank()) return
+
+        apiService.summarizeConversation(
+            previousSummary = conversation.historySummary,
+            transcript = transcript
+        ).onSuccess { summary ->
+            if (summary.isNotBlank()) {
+                conversationRepository.updateHistorySummary(
+                    conversationId = conversation.id,
+                    historySummary = summary,
+                    summaryUpToMessageId = lastCovered.id
+                )
+            }
+        }.onFailure { error ->
+            Log.w("ChatVM", "history summary failed; using local fallback for this request", error)
+        }
+    }
+
+
+    private fun launchReplyJob(block: suspend CoroutineScope.() -> Unit) {
+        val job = viewModelScope.launch(block = block)
+        activeReplyJob = job
+        job.invokeOnCompletion {
+            if (activeReplyJob === job) {
+                activeReplyJob = null
+                replyInFlight.set(false)
+                _uiState.update { it.copy(isSending = false, streamingAssistant = null) }
+            }
+        }
+    }
+
+    private fun tryStartReply(clearInput: Boolean = false): Boolean {
+        if (!replyInFlight.compareAndSet(false, true)) return false
+        _uiState.update { it.copy(isSending = true, input = if (clearInput) "" else it.input) }
+        return true
+    }
+
+    private fun clearStreamingState(conversationId: String) {
+        _uiState.update { state ->
+            if (state.streamingAssistant?.conversationId == conversationId) {
+                state.copy(isSending = false, streamingAssistant = null)
+            } else if (state.streamingAssistant == null) {
+                state.copy(isSending = false)
+            } else state
+        }
+    }
+
+    private fun isRetryableGenerationFailure(error: Throwable?): Boolean {
+        if (error == null || error is CancellationException || error is OutputTruncatedException ||
+            error is UpstreamContentBlockedException) return false
+        if (error is IncompleteStreamException) return true
+        val message = error.message.orEmpty().lowercase()
+        return listOf(
+            "timeout", "超时", "连接失败", "http 408", "http 429",
+            "http 500", "http 502", "http 503", "http 504"
+        ).any(message::contains)
+    }
+
+    private fun partialResultFromFailure(error: Throwable?): com.hana.app.data.api.models.StreamResult? {
+        return when (error) {
+            is IncompleteStreamException -> error.partialResult
+            is OutputTruncatedException -> error.partialResult
+            is UpstreamContentBlockedException -> error.partialResult
+            else -> null
+        }
+    }
+
+    private fun partialContentFromFailure(error: Throwable?): String {
+        return partialResultFromFailure(error)?.content.orEmpty()
+    }
+
+    private suspend fun saveIncompleteAssistant(
+        conversation: ConversationEntity,
+        character: CharacterCardEntity?,
+        content: String,
+        thinking: String,
+        requestStartAt: Long,
+        tokenCount: Int?
+    ) {
+        val extracted = extractThinking(content)
+        val cleanContent = ChatMessageBuilder.stripLeadingSpeakerPrefix(extracted.content.trim(), character?.name)
+        if (cleanContent.isBlank()) return
+        val cleanThinking = listOf(thinking, extracted.thinking)
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+        val timestamp = System.currentTimeMillis()
+        messageRepository.insert(
+            ChatMessageEntity(
+                conversationId = conversation.id,
+                role = "assistant",
+                speakerCharacterId = character?.id,
+                speakerName = character?.name,
+                content = cleanContent,
+                thinkingContent = cleanThinking.ifBlank { null },
+                thinkingDuration = if (cleanThinking.isBlank()) null else
+                    ((timestamp - requestStartAt) / 1000L).toInt().coerceAtLeast(1),
+                timestamp = timestamp,
+                tokenCount = tokenCount,
+                isError = true
+            )
+        )
+        val latestConversation = conversationRepository.getById(conversation.id) ?: conversation
+        conversationRepository.updateLastMessage(latestConversation, cleanContent)
+        latestConversation.characterId?.let { characterRepository.updateLastMessage(it, cleanContent) }
+    }
+
+    private suspend fun ensureConversationForSend(requestedConversationId: String?): ConversationEntity {
+        val currentId = requestedConversationId
         if (currentId != null) {
             conversationRepository.getById(currentId)?.let { return it }
         }
         return conversationRepository.createNormalConversation()
     }
 
-    private suspend fun appendStreamingDeltaGradually(startAt: Long, delta: StreamDelta) {
+    private suspend fun appendStreamingDeltaGradually(conversationId: String, startAt: Long, delta: StreamDelta) {
         if (delta.reasoningContent.isNotBlank()) {
             appendStreamingDelta(
+                conversationId = conversationId,
                 startAt = startAt,
                 content = "",
                 reasoningContent = delta.reasoningContent
@@ -1884,6 +2335,7 @@ class ChatViewModel(
 
         // 将整个 chunk 一次性更新，不逐字符 delay，避免大量 Compose 重组
         appendStreamingDelta(
+            conversationId = conversationId,
             startAt = startAt,
             content = delta.content,
             reasoningContent = ""
@@ -1892,13 +2344,16 @@ class ChatViewModel(
     }
 
     private fun appendStreamingDelta(
+        conversationId: String,
         startAt: Long,
         content: String,
         reasoningContent: String
     ) {
         try {
             _uiState.update { state ->
-                val current = state.streamingAssistant ?: StreamingAssistantState(startedAt = startAt)
+                val current = state.streamingAssistant
+                    ?.takeIf { it.conversationId == conversationId }
+                    ?: return@update state
                 val now = System.currentTimeMillis()
                 val firstResponseAt = current.firstResponseAt ?: now.takeIf {
                     content.isNotBlank() || reasoningContent.isNotBlank()
@@ -1920,341 +2375,6 @@ class ChatViewModel(
         } catch (_: Exception) {}
     }
 
-    private suspend fun buildApiMessages(
-        conversationId: String,
-        userText: String = "",
-        effectiveModel: String? = null,
-        overrideSystemPrompt: String? = null
-    ): List<ApiService.ChatPayload> {
-        val conversation = conversationRepository.getById(conversationId)
-        val history = messageRepository.getMessages(conversationId)
-        val characterState = conversation?.characterId?.let { _uiState.value.characterStoryStates[it] }
-        val settingsSnapshot = settingsRepository.getSettings()
-        val systemPrompt = overrideSystemPrompt ?: if (conversation?.characterId != null) {
-            val character = characterRepository.getById(conversation.characterId)
-            val characterPrompt = conversation.systemPrompt?.takeIf { it.isNotBlank() } ?: buildSystemPrompt(character, characterState)
-            val characterCreativePresetEnabled = settingsSnapshot.characterCreativePresetEnabled[conversation.characterId] == true
-            val creativePresetAffectsPersona = settingsSnapshot.characterCreativePresetAffectsPersona[conversation.characterId] == true
-            val creativePresetLength = settingsSnapshot.creativePresetText.trim().length
-            val personaRelatedPreset = isPersonaRelatedCreativePreset(settingsSnapshot.creativePresetText)
-            // Prefix-only injection: prepend the global creative preset while keeping the
-            // original role-card system prompt fully intact.
-            val enhancedCharacterPrompt = applyCreativePresetToCharacterPrompt(
-                basePrompt = characterPrompt,
-                creativePreset = settingsSnapshot.creativePresetText,
-                enabled = characterCreativePresetEnabled,
-                allowPersonaInfluence = creativePresetAffectsPersona
-            )
-            Log.d(
-                "ChatVM",
-                buildString {
-                    append("character prompt build: ")
-                    append("characterId=")
-                    append(conversation.characterId)
-                    append(", characterName=")
-                    append(character?.name ?: "<unknown>")
-                    append(", creativePresetEnabled=")
-                    append(characterCreativePresetEnabled)
-                    append(", creativePresetAffectsPersona=")
-                    append(creativePresetAffectsPersona)
-                    append(", presetMode=")
-                    append(
-                        when {
-                            !personaRelatedPreset -> "generic"
-                            creativePresetAffectsPersona -> "persona_related"
-                            else -> "persona_blocked"
-                        }
-                    )
-                    append(", creativePresetLength=")
-                    append(creativePresetLength)
-                    append(", basePromptLength=")
-                    append(characterPrompt.length)
-                    append(", finalPromptLength=")
-                    append(enhancedCharacterPrompt.length)
-                }
-            )
-            enhancedCharacterPrompt
-        } else {
-            conversation?.systemPrompt?.takeIf { it.isNotBlank() } ?: DEFAULT_CHINO_PROMPT
-        }
-
-        val now = java.util.Calendar.getInstance()
-        val timeInfo = buildString {
-            append("当前系统时间: ")
-            append(now.get(java.util.Calendar.YEAR)).append("年")
-            append(now.get(java.util.Calendar.MONTH) + 1).append("月")
-            append(now.get(java.util.Calendar.DAY_OF_MONTH)).append("日")
-            append(" ")
-            val dow = when (now.get(java.util.Calendar.DAY_OF_WEEK)) {
-                java.util.Calendar.SUNDAY -> "星期日"; java.util.Calendar.MONDAY -> "星期一"
-                java.util.Calendar.TUESDAY -> "星期二"; java.util.Calendar.WEDNESDAY -> "星期三"
-                java.util.Calendar.THURSDAY -> "星期四"; java.util.Calendar.FRIDAY -> "星期五"
-                java.util.Calendar.SATURDAY -> "星期六"; else -> ""
-            }
-            append(dow).append(" ")
-            append(String.format(java.util.Locale.US, "%02d:%02d", now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE)))
-        }
-
-        val webSearchEnabled = _uiState.value.webSearchEnabled
-        val supportsVisionForRequest = detectModelCapability(
-            effectiveModel ?: _uiState.value.selectedModel.takeIf { it.isNotBlank() } ?: conversation?.modelName.orEmpty(),
-            multimodalModelKeywords()
-        ) || _uiState.value.modelSupportsVision || _uiState.value.hasVisionConfig
-        val memoryBlock = if (conversation?.characterId == null) {
-            memoryRepository.getMainMemory()
-                .take(6)
-                .joinToString("\n") {
-                    val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(it.updatedAt))
-                    "- [$date] ${it.content.take(80)}"
-                }
-                .takeIf { it.isNotBlank() }
-        } else null
-        val enhancedPrompt = buildString {
-            // 全局偏好设定 - 仅对主对话生效，不影响角色卡
-            // Persona 作为最高优先级的身份层，所有AI对话必须经过这一层过滤
-            if (conversation?.characterId == null && _uiState.value.personaEnabled && _uiState.value.personaPrompt.isNotBlank()) {
-                append("【你的身份设定 - 你用这个角色的语气、性格和口吻与用户对话】\n")
-                append(_uiState.value.personaPrompt)
-                append("\n\n【回答原则 - 必须遵守】\n")
-                append("1. 你必须认真回答用户的所有问题，不能因为角色设定就敷衍、省略或拒绝回答。\n")
-                append("2. 角色性格只影响你说话的语气和方式（如傲娇、吃醋、毒舌），但不影响你完整输出信息。\n")
-                append("3. 即使角色设定是\"不情愿\"或\"高冷\"，也必须输出完整有用的内容，只是用角色的口吻来表达。\n")
-                append("4. 对事实、知识、推荐、技术等任何问题，都要给出实质性回答，不要用角色设定当借口跳过。")
-                append("\n\n[").append(timeInfo).append("]")
-            } else {
-                append(systemPrompt)
-                append("\n\n[").append(timeInfo).append("]")
-            }
-            // 角色对话中跳过模型版本声明（节省token且角色不需要知道自己是AI）
-            // 主对话中如果启用了Persona，也跳过，避免覆盖人格设定
-            if (conversation?.characterId == null && _uiState.value.personaEnabled.not() && effectiveModel != null && effectiveModel.isNotBlank()) {
-                append("\n你的模型版本: $effectiveModel")
-                append("\n当用户询问你是哪个模型/哪个AI/哪个版本时，请如实回答你是 $effectiveModel。")
-            }
-            append("\n当用户询问日期、时间、星期几时，请根据上述系统时间直接回答，不要说无法获取实时信息。")
-            if (!memoryBlock.isNullOrBlank()) {
-                val personaActive = _uiState.value.personaEnabled && _uiState.value.personaPrompt.isNotBlank()
-                if (personaActive) {
-                    append("\n\n【关于用户你已知的信息——请自然融入对话，用你的角色性格去回应这些信息，不要像读数据库一样逐条复述】\n")
-                } else {
-                    append("\n\n【关于用户的信息】\n")
-                }
-                append(memoryBlock)
-                append("\n【信息结束】")
-            }
-            if (webSearchEnabled) {
-                append("\n联网搜索已启用。")
-                val searchSettings = settingsSnapshot
-                if (searchSettings.searchIndependentMode && searchSettings.searchProviderUrl.isNotBlank()) {
-                    val searchResult = performWebSearch(userText, searchSettings.searchProviderUrl, searchSettings.searchProviderKey)
-                        if (searchResult != null) {
-                        append("\n\n【以下是联网搜索获取的参考信息】\n")
-                        append(searchResult)
-                        append("\n【搜索信息结束】\n请参考以上信息回答。")
-                    }
-                }
-            }
-        }
-
-        val contextHistory = history
-            .filter { it.role != "system" }
-            .takeLast(conversation?.contextLimit ?: 999)
-
-        // 上下文压缩：超过10轮（20条消息）时，保留最近10轮完整内容，旧消息压缩为摘要
-        // 防止长对话token溢出，同时确保模型能看到最近的完整对话
-        val MAX_FULL_CONTEXT_MSGS = 20
-        val (olderMessages, recentMessages) = if (contextHistory.size > MAX_FULL_CONTEXT_MSGS) {
-            val splitIndex = contextHistory.size - MAX_FULL_CONTEXT_MSGS
-            contextHistory.take(splitIndex) to contextHistory.drop(splitIndex)
-        } else {
-            emptyList<ChatMessageEntity>() to contextHistory
-        }
-
-        // 角色锚点：每5轮注入一次角色提醒，防止长对话中system prompt被截断后角色失忆
-        // 传入完整历史消息，用于从对话开头提取高质量风格样本
-        val characterAnchor = if (conversation?.characterId != null) {
-            buildCharacterAnchor(conversation.characterId, recentMessages, history)
-        } else null
-
-        return buildList {
-            add(ApiService.ChatPayload(role = "system", text = enhancedPrompt))
-            // 注入旧对话摘要，让模型知道历史脉络
-            if (olderMessages.isNotEmpty()) {
-                val summary = buildContextSummary(olderMessages)
-                if (summary.isNotBlank()) {
-                    add(ApiService.ChatPayload(role = "system", text = summary))
-                }
-            }
-            var roundCount = 0
-            val lastIdx = recentMessages.lastIndex
-            recentMessages.forEachIndexed { index, message ->
-                if (message.role != "system") {
-                    // 每5轮对话注入一次角色锚点（作为system消息，不影响对话流）
-                    if (roundCount > 0 && roundCount % 5 == 0 && characterAnchor != null) {
-                        add(ApiService.ChatPayload(role = "system", text = characterAnchor))
-                    }
-                    // 在最后一条用户消息前强制注入锚点：确保角色卡身份始终在模型注意力窗口内
-                    // 这是根治"人机化"的关键——无论对话多长，模型在生成回复前一定能看到角色身份
-                    if (index == lastIdx && message.role == "user" && characterAnchor != null) {
-                        add(ApiService.ChatPayload(role = "system", text = characterAnchor))
-                    }
-                    roundCount++
-                    val decoded = decodeChatContent(message.content)
-                    val imageData: List<String> = if (supportsVisionForRequest) {
-                        decoded.attachments.filter { it.kind == AttachmentKind.IMAGE }.mapNotNull { attachmentService.asImageDataUrl(it) }
-                    } else {
-                        // 非视觉模型：图片转线稿（后台静默转换，不增加额外文字）
-                        decoded.attachments.filter { it.kind == AttachmentKind.IMAGE }.mapNotNull { attachment ->
-                            attachmentService.toLineArtBase64(attachment.uri)?.first
-                        }
-                    }
-                    val fileTexts = decoded.attachments.filter { it.kind == AttachmentKind.FILE }.mapNotNull { attachment ->
-                        attachmentService.extractReadableText(attachment)?.let { text ->
-                            "[文件 ${attachment.name}]\n$text"
-                        } ?: "[文件 ${attachment.name}] 当前模型不支持直接读取该文件内容。"
-                    }
-                    add(ApiService.ChatPayload(
-                        role = message.role,
-                        text = formatMessageForApi(message, decoded.text.take(8_000), conversation?.let(::isGroupConversation) == true),
-                        imageDataUrls = imageData,
-                        fileTexts = fileTexts
-                    ))
-                }
-            }
-        }
-    }
-
-    /**
-     * 构建角色锚点：每次回复前强制注入，确保角色身份+风格+内心想法始终在模型注意力窗口内。
-     * 风格样本从对话开头提取（质量最高），避免被后期人机化回复污染。
-     */
-    private suspend fun buildCharacterAnchor(
-        characterId: String,
-        recentMessages: List<ChatMessageEntity>,
-        allHistory: List<ChatMessageEntity>
-    ): String {
-        val character = characterRepository.getById(characterId) ?: return ""
-        val state = try {
-            settingsRepository.getSettings().characterStoryStates[characterId]
-        } catch (e: Exception) { null }
-        // 从对话开头提取高质量风格样本（前5条角色回复，每条取300字）
-        // 精简样本量以节省token，确保用户消息获得足够注意力
-        val earlyStyleSamples = allHistory
-            .filter { it.role == "assistant" && it.speakerCharacterId == characterId }
-            .take(5)
-            .mapNotNull { msg ->
-                val text = msg.content.trim().take(300)
-                if (text.isNotBlank()) "「$text」" else null
-            }
-        // 如果对话开头样本不足，用最近回复补充
-        val styleSamples = if (earlyStyleSamples.size >= 3) {
-            earlyStyleSamples
-        } else {
-            (earlyStyleSamples + recentMessages
-                .filter { it.role == "assistant" && it.speakerCharacterId == characterId }
-                .takeLast(3)
-                .mapNotNull { msg ->
-                    val text = msg.content.trim().take(300)
-                    if (text.isNotBlank()) "「$text」" else null
-                }).take(5)
-        }
-        // greeting 作为风格样本（取300字，精简以节省token）
-        val greetingSample = character.greeting.trim().take(300)
-            .takeIf { it.isNotBlank() }
-            ?.let { "「$it」" }
-        // 提取最近角色内心想法作为示例
-        val innerThoughtSample = recentMessages
-            .filter { it.role == "assistant" && it.speakerCharacterId == characterId && !it.thinkingContent.isNullOrBlank() }
-            .takeLast(1)
-            .mapNotNull { msg ->
-                val thinking = msg.thinkingContent!!.trim().take(80)
-                if (thinking.isNotBlank()) "<inner>${thinking}...</inner>" else null
-            }
-            .firstOrNull()
-
-        return buildString {
-            // ===== 第1部分：内心想法指令（放在最前面，确保不被忽略） =====
-            append("【强制要求·内心想法】")
-            append("你的每一条回复末尾，必须包含<inner>...</inner>标签，写出${character.name}此刻的真实内心想法。")
-            append("内心想法要精炼，一两句话即可，但要精准戳中角色此刻最真实的那一个念头——")
-            append("是心动、是后悔、是窃喜、是心疼，挑最要命的那一个写。")
-            append("不要写流水账，不要复述已经发生的事，只写角色嘴上没说但心里最在意的那个点。")
-            append("这是强制格式，不能省略、不能敷衍、不能用\"（内心：...）\"等其他格式替代。")
-            if (innerThoughtSample != null) {
-                append("示例格式：$innerThoughtSample")
-            }
-            append("如果本轮回复没有内心想法，这轮回复无效。")
-
-            // ===== 第2部分：角色身份 =====
-            append("【角色身份】你是${character.name}")
-            if (character.userPersona.isNotBlank()) {
-                append("。性格：${character.userPersona.take(200)}")
-            }
-            if (character.description.isNotBlank()) {
-                append("。背景：${character.description.take(250)}")
-            }
-            if (state != null) {
-                append("。当前好感度${state.affection}，信任度${state.trust}，关系阶段：${state.relationshipAnchor}。")
-                append("你的回复应体现这个关系阶段应有的亲密度和语气。")
-            }
-
-            // ===== 第3部分：风格样本 =====
-            val samples = listOfNotNull(greetingSample) + styleSamples
-            if (samples.isNotEmpty()) {
-                append("【你的说话风格·必须模仿】以下是你的角色开场白和对话开头的回复片段，这是你最纯正的风格，请严格模仿：")
-                append(samples.distinct().joinToString(" "))
-                append("你的写作风格应该是：生动、细腻、充满身体细节和情感描写，像小说一样有画面感。")
-                append("用动作、表情、环境、内心活动来传递情绪，而不是直接说\"我很开心\"或\"我很难过\"。")
-            }
-
-            // ===== 第4部分：剧情回应要求 =====
-            append("【剧情回应要求】")
-            append("用户消息中可能包含多个用括号包裹的剧情场景，你必须逐一回应每一个场景，按顺序推进剧情。")
-            append("不能只回应最后几个场景，不能跳过前面的场景。请完整覆盖用户提供的所有剧情点，一个不漏。")
-
-            // ===== 第5部分：行为约束 =====
-            append("【禁止事项】")
-            append("1. 禁止使用\"作为AI\"\"根据设定\"\"用户\"\"你问我答\"等出戏表述。")
-            append("2. 禁止说教、总结对话、评价对话本身。")
-            append("3. 禁止跳出角色以第三人称描述自己。")
-            append("4. 禁止用省略号或短句敷衍——每一轮都要有完整的场景、动作、对话和情感。")
-        }
-    }
-
-    /**
-     * 构建历史对话摘要：当上下文超过10轮时，将旧对话压缩为结构化摘要。
-     * 参考 OpenTavern 的自动总结机制：提取关键剧情事件，而非简单罗列消息。
-     */
-    private fun buildContextSummary(messages: List<ChatMessageEntity>): String {
-        if (messages.isEmpty()) return ""
-        val userMsgs = messages.filter { it.role == "user" }
-        val assistantMsgs = messages.filter { it.role == "assistant" }
-        if (userMsgs.isEmpty()) return ""
-        return buildString {
-            append("【历史对话摘要·共约${messages.size / 2}轮】")
-            append("\n以下是对之前对话中发生的关键事件的总结，请记住这些背景信息，并在后续对话中自然延续：")
-            // 提取用户消息中的关键事件（取前80字作为事件摘要）
-            val events = userMsgs.mapNotNull { msg ->
-                val text = decodeChatContent(msg.content).text.trim().take(80)
-                if (text.isNotBlank()) text else null
-            }
-            // 限制事件数为10条，避免摘要过长
-            events.takeLast(10).forEachIndexed { index, event ->
-                append("\n${index + 1}. $event")
-            }
-            // 加入角色关键回应摘要
-            val keyResponses = assistantMsgs.takeLast(5).mapNotNull { msg ->
-                val text = msg.content.trim().take(60)
-                if (text.isNotBlank()) "「$text」" else null
-            }
-            if (keyResponses.isNotEmpty()) {
-                append("\n\n角色最近的回应风格参考：")
-                append(keyResponses.joinToString(" "))
-            }
-            append("\n\n【摘要结束·以下是最近对话，请以角色身份自然延续，不要重复摘要中的内容】")
-        }
-    }
-
     private suspend fun requestGroupAssistantReplies(
         conversation: ConversationEntity,
         userText: String
@@ -2268,7 +2388,18 @@ class ChatViewModel(
         _uiState.update { it.copy(isSending = true, streamingAssistant = null) }
         try {
             ensureUsableConnectionSettings()
+            val mentionedIds = mentionedParticipantIds(participants, userText)
             val replyCharacters = chooseGroupReplyCharacters(latestConversation, participants, userText)
+                .let { candidates ->
+                    val explicitlyMentioned = candidates.filter { it.character.id in mentionedIds }
+                    if (mentionedIds.size == 1 && !invitesGroupParticipation(userText)) {
+                        explicitlyMentioned.take(1)
+                    } else candidates
+                }
+            val roundId = messageRepository.getMessages(conversation.id)
+                .lastOrNull { it.role == "user" }?.roundId
+                ?: UUID.randomUUID().toString()
+            var previousReply: ChatMessageEntity? = null
             for ((index, candidate) in replyCharacters.withIndex()) {
                 val latest = conversationRepository.getById(conversation.id) ?: latestConversation
                 val requestStartAt = System.currentTimeMillis()
@@ -2276,6 +2407,7 @@ class ChatViewModel(
                     it.copy(
                         isSending = true,
                         streamingAssistant = StreamingAssistantState(
+                            conversationId = conversation.id,
                             speakerCharacterId = candidate.character.id,
                             speakerName = candidate.character.name,
                             startedAt = requestStartAt
@@ -2288,14 +2420,18 @@ class ChatViewModel(
                     userText = userText,
                     participants = participants,
                     requestStartAt = requestStartAt,
-                    responseOffset = index
+                    responseOffset = index,
+                    roundId = roundId,
+                    turnIndex = index + 1,
+                    previousReply = previousReply
                 )
                 if (!result) {
                     break
                 }
+                previousReply = messageRepository.getLastMessage(conversation.id)
             }
         } finally {
-            _uiState.update { it.copy(isSending = false, streamingAssistant = null) }
+            clearStreamingState(conversation.id)
         }
     }
 
@@ -2305,40 +2441,81 @@ class ChatViewModel(
         userText: String,
         participants: List<CharacterCardEntity>,
         requestStartAt: Long,
-        responseOffset: Int
+        responseOffset: Int,
+        roundId: String,
+        turnIndex: Int,
+        previousReply: ChatMessageEntity?
     ): Boolean {
         val settingsModel = settingsRepository.getSettings().selectedModel.takeIf { it.isNotBlank() }
-        val effectiveModel = character.modelId.takeIf { it.isNotBlank() }
-            ?: conversation.modelName?.takeIf { it.isNotBlank() }
+        val fallbackModel = conversation.modelName?.takeIf { it.isNotBlank() }
             ?: _uiState.value.selectedModel.takeIf { it.isNotBlank() }
             ?: settingsModel
-        val systemPrompt = buildGroupCharacterPrompt(conversation, character, participants)
-        val apiMessages = buildApiMessages(
+        val activeBaseUrl = modelRepository.getActive()?.baseUrl?.trim()?.trimEnd('/').orEmpty()
+        val availableModels = modelCacheRepository.getAll()
+            .filter { activeBaseUrl.isBlank() || it.baseUrl.trim().trimEnd('/') == activeBaseUrl }
+            .mapTo(mutableSetOf()) { it.name }
+        val effectiveModel = resolveGroupCharacterModel(
+            characterModel = character.modelId,
+            fallbackModel = fallbackModel,
+            availableModels = availableModels
+        )
+        if (character.modelId.isNotBlank() && effectiveModel != character.modelId && effectiveModel != null) {
+            _error.emit("${character.name} 绑定的模型“${character.modelId}”在当前服务商不可用，已回退到 $effectiveModel")
+        }
+        val systemPrompt = messageBuilder.buildGroupCharacterPrompt(
+            conversation,
+            character,
+            participants,
+            ::getCharacterStoryState,
+            previousReply,
+            previousReply?.speakerCharacterId?.let { targetId ->
+                _uiState.value.interCharacterRelations[interCharacterRelationKey(character.id, targetId)]
+            }
+        )
+        refreshHistorySummaryIfNeeded(conversation, effectiveModel)
+        val apiMessages = messageBuilder.buildApiMessages(
             conversationId = conversation.id,
             userText = userText,
             effectiveModel = effectiveModel,
-            overrideSystemPrompt = systemPrompt
+            overrideSystemPrompt = systemPrompt,
+            webSearchEnabled = _uiState.value.webSearchEnabled,
+            personaEnabled = _uiState.value.personaEnabled,
+            personaPrompt = _uiState.value.personaPrompt,
+            modelSupportsVision = _uiState.value.modelSupportsVision,
+            hasVisionConfig = _uiState.value.hasVisionConfig,
+            selectedModel = _uiState.value.selectedModel,
+            characterStoryStates = _uiState.value.characterStoryStates,
+            creativePresetCharacterId = character.id,
+            creativePresetTextOverride = _uiState.value.creativePresetText,
+            creativePresetEnabledOverride = _uiState.value.characterCreativePresetEnabled[character.id],
+            creativePresetAffectsPersonaOverride = _uiState.value.characterCreativePresetAffectsPersona[character.id],
+            characterCreativePresetTextOverride = _uiState.value.characterCreativePresetTexts[character.id],
+            characterCreativePresetEnabledOverride = _uiState.value.characterIndependentCreativePresetEnabled[character.id],
+            characterCreativePresetAffectsPersonaOverride = _uiState.value.characterIndependentCreativePresetAffectsPersona[character.id],
+            groupViewerCharacterId = character.id,
+            maxOutputTokens = conversation.maxTokens
         )
+        publishPromptPreview(apiMessages)
         val shouldUseVisionConfig = _uiState.value.hasVisionConfig && apiMessages.any {
             it.imageDataUrls.isNotEmpty() || it.fileTexts.isNotEmpty()
         }
         val effectiveTemperature = if (character.temperature > 0f) character.temperature else conversation.temperature
-        val streamResult = if (_uiState.value.streamEnabled) {
+        suspend fun executeGroupRequest(model: String?) = if (_uiState.value.streamEnabled) {
             apiService.streamChat(
                 messages = apiMessages,
-                model = effectiveModel,
+                model = model,
                 useVisionConfig = shouldUseVisionConfig,
                 temperature = effectiveTemperature,
                 topP = conversation.topP,
                 maxTokens = conversation.maxTokens,
                 timeoutSeconds = _uiState.value.timeoutSeconds.toLong(),
                 webSearch = _uiState.value.webSearchEnabled,
-                onDelta = { delta -> appendStreamingDeltaGradually(requestStartAt, delta) }
+                onDelta = { delta -> appendStreamingDeltaGradually(conversation.id, requestStartAt, delta) }
             )
         } else {
             apiService.chat(
                 messages = apiMessages,
-                model = effectiveModel,
+                model = model,
                 useVisionConfig = shouldUseVisionConfig,
                 temperature = effectiveTemperature,
                 topP = conversation.topP,
@@ -2347,18 +2524,31 @@ class ChatViewModel(
                 webSearch = _uiState.value.webSearchEnabled
             ).onSuccess { result ->
                 appendStreamingDelta(
+                    conversationId = conversation.id,
                     startAt = requestStartAt,
                     content = result.content,
                     reasoningContent = result.reasoningContent
                 )
             }
         }
+        var streamResult = executeGroupRequest(effectiveModel)
+        val failedWith404 = streamResult.exceptionOrNull()?.message.orEmpty().contains("HTTP 404", ignoreCase = true)
+        if (failedWith404 && fallbackModel != null && !effectiveModel.equals(fallbackModel, ignoreCase = true)) {
+            _uiState.update { state ->
+                val current = state.streamingAssistant
+                if (current?.conversationId == conversation.id && current.speakerCharacterId == character.id) {
+                    state.copy(streamingAssistant = current.copy(content = "", thinkingContent = ""))
+                } else state
+            }
+            _error.emit("${character.name} 的专属模型返回 404，正在使用 $fallbackModel 重试")
+            streamResult = executeGroupRequest(fallbackModel)
+        }
         if (streamResult.exceptionOrNull() is CancellationException) {
             return false
         }
         var success = true
         streamResult.onSuccess { result ->
-            val streamingState = _uiState.value.streamingAssistant
+            val streamingState = _uiState.value.streamingAssistant?.takeIf { it.conversationId == conversation.id }
             val finalContent = streamingState?.content?.ifBlank { result.content } ?: result.content
             val finalThinking = streamingState?.thinkingContent?.ifBlank { result.reasoningContent } ?: result.reasoningContent
             val firstResponseAt = streamingState?.firstResponseAt
@@ -2369,7 +2559,9 @@ class ChatViewModel(
             val mergedThinking = listOf(finalThinking, extractedThinking.thinking)
                 .filter { it.isNotBlank() }
                 .joinToString("\n\n")
-            val cleanContent = sanitizeGroupReplyContent(extractedThinking.content.trim(), character.name, participants)
+            val quotePrevious = previousReply != null && extractedThinking.content.contains("<quote_previous/>", ignoreCase = true)
+            val replyContent = extractedThinking.content.replace(Regex("<quote_previous\\s*/>", RegexOption.IGNORE_CASE), "").trim()
+            val cleanContent = ChatMessageBuilder.sanitizeGroupReplyContent(replyContent, character.name, participants)
             if (cleanContent.isBlank()) {
                 success = false
                 return@onSuccess
@@ -2382,6 +2574,15 @@ class ChatViewModel(
                         role = "assistant",
                         speakerCharacterId = character.id,
                         speakerName = character.name,
+                        roundId = roundId,
+                        turnIndex = turnIndex,
+                        replyToMessageId = previousReply?.id?.takeIf { quotePrevious },
+                        replyToSpeakerCharacterId = previousReply?.speakerCharacterId?.takeIf { quotePrevious },
+                        replyToSpeakerName = previousReply?.speakerName?.takeIf { quotePrevious },
+                        replyToContent = previousReply?.content
+                            ?.let(ChatMessageBuilder::publicGroupContent)
+                            ?.take(220)
+                            ?.takeIf { quotePrevious },
                         content = cleanContent,
                         thinkingContent = mergedThinking.ifBlank { null },
                         thinkingDuration = if (mergedThinking.isBlank()) null else thinkingDuration,
@@ -2399,16 +2600,37 @@ class ChatViewModel(
                     messageRepository.getMessages(conversation.id).count { it.role == "user" },
                     messageRepository.getMessages(conversation.id).count { it.role == "assistant" && it.speakerCharacterId == character.id }
                 )
-                val progress = advanceCharacterStoryState(
+                val progress = if (isMetaSafetyRefusal(cleanContent)) {
+                    null
+                } else advanceCharacterStoryState(
                     previous = getCharacterStoryState(character.id),
                     userText = userText,
                     assistantText = cleanContent,
                     assistantInnerThought = mergedThinking,
                     rounds = totalRounds,
+                    directInteractionAllowed = isDirectGroupInteractionFor(character, participants, userText),
+                    otherCharacterNames = participants.filterNot { it.id == character.id }.map { it.name },
+                    roleInteractionOnly = quotePrevious,
                     timestamp = responseSavedAt
                 )
-                settingsRepository.saveCharacterStoryState(character.id, progress.state)
-                if (progress.shouldAppendLog) {
+                progress?.let { settingsRepository.saveCharacterStoryState(character.id, it.state) }
+                if (quotePrevious && previousReply?.speakerCharacterId != null) {
+                    val targetId = previousReply.speakerCharacterId
+                    val key = interCharacterRelationKey(character.id, targetId)
+                    val previousRelation = _uiState.value.interCharacterRelations[key] ?: InterCharacterRelationState()
+                    val nextRelation = advanceInterCharacterRelation(
+                        previous = previousRelation,
+                        responseText = cleanContent,
+                        sourceName = character.name,
+                        targetName = previousReply.speakerName ?: "上一位角色",
+                        timestamp = responseSavedAt
+                    )
+                    _generationCompleted.tryEmit(Unit)
+                    if (nextRelation != previousRelation) {
+                        settingsRepository.saveInterCharacterRelation(character.id, targetId, nextRelation)
+                    }
+                }
+                if (progress?.shouldAppendLog == true) {
                     settingsRepository.appendCharacterStoryLog(
                         character.id,
                         CharacterStoryLogEntry(
@@ -2425,16 +2647,58 @@ class ChatViewModel(
                 if (!updatedConversation.isNamed) {
                     autoNameConversation(updatedConversation, userText, cleanContent)
                 }
+                breakArmorOutputDiagnostic(character.id, cleanContent)?.let { warning ->
+                    _error.emit(warning)
+                }
+                _generationCompleted.tryEmit(Unit)
             }.join()
         }.onFailure {
             success = false
-            _error.emit("发送失败: ${it.message.orEmpty().take(80)}")
+            val streamingPartial = _uiState.value.streamingAssistant
+                ?.takeIf { state -> state.conversationId == conversation.id }
+            val failurePartial = partialResultFromFailure(it)
+            val visiblePartial = streamingPartial?.content?.takeIf { text -> text.isNotBlank() }
+                ?: failurePartial?.content.orEmpty()
+            if (visiblePartial.isNotBlank()) {
+                saveIncompleteAssistant(
+                    conversation = conversation,
+                    character = character,
+                    content = visiblePartial,
+                    thinking = streamingPartial?.thinkingContent?.takeIf { text -> text.isNotBlank() }
+                        ?: failurePartial?.reasoningContent.orEmpty(),
+                    requestStartAt = requestStartAt,
+                    tokenCount = failurePartial?.totalTokens
+                )
+            }
+            _error.emit(formatChatFailure(it))
         }
         return success
     }
 
-    private fun isGroupConversation(conversation: ConversationEntity): Boolean {
-        return conversation.conversationType == "group" && !conversation.participantCharacterIds.isNullOrBlank()
+    private fun formatChatFailure(error: Throwable): String {
+        return when (error) {
+            is UpstreamContentBlockedException ->
+                "上游模型或 API 服务商拦截了本次内容（${error.reason.take(80)}）。破甲提示已发送，但 App 无法关闭服务端安全策略。"
+            is IncompleteStreamException ->
+                "流式连接中断，已保留当前正文；下一轮会从这里继续。"
+            is OutputTruncatedException ->
+                "回复达到当前输出长度上限，已保留当前正文；下一轮会从这里继续。"
+            else -> "发送失败: ${error.message.orEmpty().take(100)}"
+        }
+    }
+
+    private fun breakArmorOutputDiagnostic(characterId: String?, content: String): String? {
+        val id = characterId ?: return null
+        val state = _uiState.value
+        val breakArmorEnabled = state.characterCreativePresetEnabled[id] == true
+        if (!breakArmorEnabled || content.isBlank()) return null
+
+        return when (diagnoseBreakArmorOutput(content)) {
+            "japanese_residue" -> "破甲诊断：回复中检测到日语中介残留，正文已保留。可在最终 Prompt 中确认第四层是否完整注入。"
+            "refusal_template" -> null
+            "too_short" -> "破甲诊断：模型正文异常简短，内容已保留。建议查看结束原因和最终 Prompt 注入状态。"
+            else -> null
+        }
     }
 
     private suspend fun getConversationParticipants(conversation: ConversationEntity): List<CharacterCardEntity> {
@@ -2456,11 +2720,7 @@ class ChatViewModel(
             .filter { it.role == "assistant" && !it.speakerCharacterId.isNullOrBlank() }
             .mapNotNull { it.speakerCharacterId }
             .distinct()
-        val lowerUserText = userText.lowercase()
-        val mentionedIds = participants.filter { character ->
-            lowerUserText.contains("@${character.name.lowercase()}") ||
-                lowerUserText.contains(character.name.lowercase())
-        }.map { it.id }.toSet()
+        val mentionedIds = mentionedParticipantIds(participants, userText)
         val ranked = participants.map { character ->
             val storyState = getCharacterStoryState(character.id)
             var score = storyState.affection / 8 + storyState.relationshipMomentum / 10 - storyState.tension / 20
@@ -2469,7 +2729,13 @@ class ChatViewModel(
             if (recentAssistantSpeakers.take(2).contains(character.id)) score -= 2
             GroupReplyCandidate(character, score)
         }.sortedByDescending { it.score }
-        val targetCount = 2
+        val targetCount = when {
+            mentionedIds.size >= 3 -> 3
+            mentionedIds.size == 2 -> 2
+            mentionedIds.size == 1 && !invitesGroupParticipation(userText) -> 1
+            invitesGroupParticipation(userText) || userText.length >= 120 -> 3
+            else -> 2
+        }.coerceAtMost(participants.size)
         val picked = ranked.take(targetCount)
         if (mentionedIds.isEmpty()) return picked
         val mentionedFirst = ranked.filter { mentionedIds.contains(it.character.id) }
@@ -2477,78 +2743,49 @@ class ChatViewModel(
         return (mentionedFirst + remaining).take(targetCount)
     }
 
-    private suspend fun buildGroupCharacterPrompt(
-        conversation: ConversationEntity,
-        currentCharacter: CharacterCardEntity,
-        participants: List<CharacterCardEntity>
-    ): String {
-        val state = getCharacterStoryState(currentCharacter.id)
-        val basePrompt = buildSystemPrompt(currentCharacter, state)
-        val others = participants.filter { it.id != currentCharacter.id }
-        val history = messageRepository.getMessages(conversation.id).takeLast(8)
-        val participantNames = participants.joinToString("、") { it.name }
-        val latestOthers = history.asReversed()
-            .filter { it.role == "assistant" && it.speakerCharacterId != currentCharacter.id }
-            .take(2)
-            .joinToString("\n") { msg ->
-                val speaker = msg.speakerName?.takeIf { it.isNotBlank() } ?: "其他角色"
-                "$speaker: ${msg.content.take(60)}"
-            }
-        return buildString {
-            append(basePrompt)
-            append("\n\n【群聊模式】")
-            append("\n在场角色：")
-            append(participantNames)
-            if (latestOthers.isNotBlank()) {
-                append("\n最近他人发言：\n")
-                append(latestOthers)
-            }
-            append("\n你只代表你自己发言，不要替其他角色说话。")
-            append("\n先回应用户，再自然表现关注、竞争、吃醋、试探或插话欲，但不要总结全场。")
-            append("\n若提到别人，只能写你的看法和反应；单轮控制在 1 到 2 段。")
+    private fun mentionedParticipantIds(participants: List<CharacterCardEntity>, userText: String): Set<String> {
+        val lowerText = userText.lowercase()
+        return participants.filter { character ->
+            lowerText.contains("@${character.name.lowercase()}") || lowerText.contains(character.name.lowercase())
+        }.map { it.id }.toSet()
+    }
+
+    private fun invitesGroupParticipation(userText: String): Boolean {
+        return listOf("大家", "你们", "所有人", "都说说", "一起", "群里", "各位").any {
+            userText.contains(it, ignoreCase = true)
         }
     }
 
-    private fun formatMessageForApi(message: ChatMessageEntity, text: String, isGroupConversation: Boolean): String {
-        if (message.role == "user" || !isGroupConversation) return text
-        val speaker = message.speakerName?.takeIf { it.isNotBlank() } ?: return text
-        return "[$speaker]\n$text"
+    fun getInterCharacterRelations(): Map<String, InterCharacterRelationState> =
+        _uiState.value.interCharacterRelations
+
+    private fun isDirectGroupInteractionFor(
+        character: CharacterCardEntity,
+        participants: List<CharacterCardEntity>,
+        userText: String
+    ): Boolean {
+        val lowerText = userText.lowercase()
+        val mentionedIds = participants.filter { participant ->
+            lowerText.contains("@${participant.name.lowercase()}") ||
+                lowerText.contains(participant.name.lowercase())
+        }.map { it.id }.toSet()
+        return mentionedIds.isEmpty() || character.id in mentionedIds
     }
 
-    private fun stripLeadingSpeakerPrefix(content: String, speakerName: String?): String {
-        val name = speakerName?.trim().orEmpty()
-        if (name.isBlank() || content.isBlank()) return content
-        val patterns = listOf(
-            Regex("^(?:${Regex.escape(name)}\\s*){2,}"),
-            Regex("^${Regex.escape(name)}\\s*[：:]\\s*"),
-            Regex("^\\[${Regex.escape(name)}]\\s*"),
-            Regex("^${Regex.escape(name)}\\s+")
+    private fun isDirectInteractionFor(
+        characterId: String,
+        otherCharacters: List<CharacterCardEntity>,
+        userText: String
+    ): Boolean {
+        val lowerText = userText.lowercase()
+        val mentionedOther = otherCharacters.any { other ->
+            lowerText.contains("@${other.name.lowercase()}") || lowerText.contains(other.name.lowercase())
+        }
+        val currentName = _uiState.value.characters.firstOrNull { it.id == characterId }?.name.orEmpty()
+        val currentMentioned = currentName.isNotBlank() && (
+            lowerText.contains("@${currentName.lowercase()}") || lowerText.contains(currentName.lowercase())
         )
-        return patterns.fold(content) { acc, regex -> regex.replace(acc, "") }.trimStart()
-    }
-
-    private fun sanitizeGroupReplyContent(
-        content: String,
-        currentSpeakerName: String,
-        participants: List<CharacterCardEntity>
-    ): String {
-        if (content.isBlank()) return content
-        val otherNames = participants.map { it.name }.filter { it != currentSpeakerName }
-        val blockedPrefixes = buildList {
-            otherNames.forEach { name ->
-                add("$name：")
-                add("$name:")
-                add("[$name]")
-            }
-        }
-        val filtered = content.lines()
-            .filterNot { line ->
-                val trimmed = line.trimStart()
-                blockedPrefixes.any { prefix -> trimmed.startsWith(prefix) }
-            }
-            .joinToString("\n")
-            .trim()
-        return filtered.ifBlank { content }
+        return !mentionedOther || currentMentioned
     }
 
     private suspend fun ensureUsableConnectionSettings() {
@@ -2586,7 +2823,7 @@ class ChatViewModel(
     ) {
         viewModelScope.launch {
             runCatching {
-                if (conversation.conversationType == "group") {
+                if (conversation.isGroupConversation()) {
                     val participantNames = conversation.participantCharacterIds
                         .orEmpty()
                         .split(',')
@@ -2633,7 +2870,9 @@ class ChatViewModel(
     }
 
     private suspend fun performWebSearch(query: String, url: String, apiKey: String): String? {
-        return try {
+        return withContext(Dispatchers.IO) {
+            var call: okhttp3.Call? = null
+            try {
             val body = org.json.JSONObject().apply {
                 put("query", query)
                 if (url.contains("tavily")) {
@@ -2648,10 +2887,12 @@ class ChatViewModel(
                 .header("Content-Type", "application/json")
                 .apply { if (!url.contains("tavily")) header("Authorization", "Bearer $apiKey") }
                 .build()
-            val response = searchHttpClient.newCall(request).execute()
-            if (!response.isSuccessful) return null
-            val json = org.json.JSONObject(response.body?.string().orEmpty())
-            buildString {
+            call = searchHttpClient.newCall(request)
+            activeSearchCall.set(call)
+            call.execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                val json = org.json.JSONObject(response.body?.string().orEmpty())
+                buildString {
                 if (url.contains("tavily")) {
                     val answer = json.optString("answer", "")
                     if (answer.isNotBlank()) { appendLine(answer); appendLine() }
@@ -2665,10 +2906,16 @@ class ChatViewModel(
                 } else {
                     appendLine(json.toString(2).take(1500))
                 }
-            }.takeIf { it.isNotBlank() }
-        } catch (e: Exception) {
-            Log.e("ChatVM", "Search failed", e)
-            null
+                }.takeIf { it.isNotBlank() }
+            }
+            } catch (e: Exception) {
+                if (e !is java.io.InterruptedIOException) {
+                    Log.e("ChatVM", "Search failed", e)
+                }
+                null
+            } finally {
+                call?.let { activeSearchCall.compareAndSet(it, null) }
+            }
         }
     }
 

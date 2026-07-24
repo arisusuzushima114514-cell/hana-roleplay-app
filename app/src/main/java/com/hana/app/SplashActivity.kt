@@ -4,7 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
-import androidx.activity.ComponentActivity
+import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -41,12 +41,33 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.hana.app.core.AppContainer
+import com.hana.app.data.settings.SettingsRepository
+import com.hana.app.data.customization.CustomizationRepository
+import com.hana.app.data.customization.CustomizationSettings
+import com.hana.app.manager.LanguageManager
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlin.random.Random
+import coil.compose.AsyncImage
+import java.io.File
 
-class SplashActivity : ComponentActivity() {
+class SplashActivity : AppCompatActivity() {
+    override fun attachBaseContext(newBase: android.content.Context) {
+        val localizedContext = try {
+            val language = runBlocking { SettingsRepository(newBase).settingsFlow.first().language }
+            LanguageManager.applyLocaleConfig(newBase, language)
+        } catch (_: Exception) {
+            newBase
+        }
+        super.attachBaseContext(localizedContext)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val customization = runCatching {
+            runBlocking { CustomizationRepository(applicationContext).settingsFlow.first() }
+        }.getOrDefault(CustomizationSettings())
 
         try {
             enterImmersiveMode()
@@ -54,6 +75,7 @@ class SplashActivity : ComponentActivity() {
 
         setContent {
             SplashScreen(
+                customization = customization,
                 onInitStart = {
                     preInitAppContainer()
                 },
@@ -100,7 +122,7 @@ class SplashActivity : ComponentActivity() {
 }
 
 @Composable
-private fun SplashScreen(onInitStart: () -> Unit, onDone: () -> Unit) {
+private fun SplashScreen(customization: CustomizationSettings, onInitStart: () -> Unit, onDone: () -> Unit) {
     val backgroundRes = remember {
         try {
             listOf(
@@ -124,7 +146,7 @@ private fun SplashScreen(onInitStart: () -> Unit, onDone: () -> Unit) {
         } catch (e: Exception) {
             initFailed = true
         }
-        delay(if (initFailed) 500 else 2_200)
+        delay(if (initFailed) 500 else customization.splashDurationMillis.toLong())
         visible = false
         delay(400)
         try { onDone() } catch (_: Exception) {}
@@ -143,13 +165,13 @@ private fun SplashScreen(onInitStart: () -> Unit, onDone: () -> Unit) {
                     CircularProgressIndicator(color = Color.White, modifier = Modifier.size(48.dp))
                 }
             } else {
-                val bgRes = try { backgroundRes } catch (_: Exception) { R.drawable.splash_1 }
-                Image(
-                    painter = painterResource(bgRes),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
+                val customFile = customization.customSplashPath.takeIf { customization.customSplashEnabled }?.let(::File)?.takeIf { it.isFile }
+                if (customFile != null) {
+                    AsyncImage(model = customFile, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else {
+                    val bgRes = try { backgroundRes } catch (_: Exception) { R.drawable.splash_1 }
+                    Image(painter = painterResource(bgRes), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                }
             }
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -163,7 +185,7 @@ private fun SplashScreen(onInitStart: () -> Unit, onDone: () -> Unit) {
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = "BY: Vanflower / 万花",
+                    text = customization.appDisplayName.ifBlank { "Hana" },
                     color = Color.White,
                     fontSize = 18.sp,
                     textAlign = TextAlign.Center,

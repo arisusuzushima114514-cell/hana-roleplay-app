@@ -11,6 +11,13 @@ import java.io.ByteArrayInputStream
 import java.io.DataInputStream
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import java.util.zip.InflaterInputStream
+
+data class CharacterCardImportResult(
+    val character: CharacterCardEntity,
+    val embeddedAvatarBytes: ByteArray? = null,
+    val sourceFormat: String
+)
 
 class CharacterRepository(
     private val dao: CharacterCardDao
@@ -46,8 +53,11 @@ class CharacterRepository(
     suspend fun delete(character: CharacterCardEntity) { dao.delete(character) }
 
     suspend fun updateLastMessage(characterId: String, preview: String) {
-        val entity = dao.getById(characterId) ?: return
-        dao.update(entity.copy(lastMessageAt = System.currentTimeMillis(), lastMessagePreview = preview))
+        dao.updateLastMessage(characterId, System.currentTimeMillis(), preview)
+    }
+
+    suspend fun resetLastMessage(characterId: String, preview: String) {
+        dao.updateLastMessage(characterId, 0L, preview)
     }
 
     suspend fun importCharacterCardJson(json: String): CharacterCardEntity {
@@ -73,12 +83,23 @@ class CharacterRepository(
     }
 
     suspend fun importCharacterCardBytes(bytes: ByteArray): CharacterCardEntity {
+        return importCharacterCard(bytes).character
+    }
+
+    suspend fun importCharacterCard(bytes: ByteArray): CharacterCardImportResult {
         require(bytes.isNotEmpty()) { "文件内容为空" }
         return if (isPng(bytes)) {
             val json = extractCharacterJsonFromPng(bytes)
-            importCharacterCardJson(json)
+            CharacterCardImportResult(
+                character = importCharacterCardJson(json),
+                embeddedAvatarBytes = bytes,
+                sourceFormat = "png"
+            )
         } else {
-            importCharacterCardJson(bytes.toString(Charsets.UTF_8))
+            CharacterCardImportResult(
+                character = importCharacterCardJson(bytes.toString(Charsets.UTF_8)),
+                sourceFormat = "json"
+            )
         }
     }
 
@@ -87,10 +108,10 @@ class CharacterRepository(
 
     private fun parseFromArray(array: JSONArray): CharacterCardEntity {
         require(array.length() > 0) { "JSON 数组为空，找不到角色卡" }
-        val candidate = (0 until array.length())
+        val candidates = (0 until array.length())
             .mapNotNull { index -> array.opt(index) as? JSONObject }
-            .firstNotNullOfOrNull { obj -> runCatching { parseFromObject(obj) }.getOrNull() }
-        return candidate ?: error("JSON 数组里没有可识别的角色卡")
+            .mapNotNull { obj -> runCatching { parseFromObject(obj) }.getOrNull() }
+        return candidates.firstOrNull() ?: error("JSON 数组里没有可识别的角色卡")
     }
 
     private fun parseFromObject(root: JSONObject): CharacterCardEntity {
@@ -157,7 +178,10 @@ class CharacterRepository(
             root.opt("temperature"),
             payload.opt("temp")
         ) ?: 0.9f
-
+        val hanaMetadata = payload.optJSONObject("extensions")?.optJSONObject("hana")
+            ?: root.optJSONObject("extensions")?.optJSONObject("hana")
+            ?: payload.optJSONObject("metadata")
+            ?: root.optJSONObject("metadata")
         return CharacterCardEntity(
             id = firstNonBlank(
                 payload.optString("id"),
@@ -170,8 +194,8 @@ class CharacterRepository(
             greeting = greeting,
             userPersona = userPersona,
             tags = tags,
-            modelId = firstNonBlank(payload.optString("modelId"), root.optString("modelId")),
-            temperature = temperature.coerceIn(0f, 2f),
+            modelId = firstNonBlank(payload.optString("modelId"), root.optString("modelId"), hanaMetadata?.optString("modelId")),
+            temperature = (firstFloat(hanaMetadata?.opt("temperature")) ?: temperature).coerceIn(0f, 2f),
             createdAt = firstLong(payload.opt("createdAt"), root.opt("createdAt")) ?: now,
             updatedAt = firstLong(payload.opt("updatedAt"), root.opt("updatedAt")) ?: now
         )
@@ -208,7 +232,7 @@ class CharacterRepository(
             stream.readFully(data)
             stream.skipBytes(4)
 
-            if (type == "tEXt" || type == "iTXt") {
+            if (type == "tEXt" || type == "iTXt" || type == "zTXt") {
                 extractCharacterPayloadFromTextChunk(type, data)?.let { return it }
             }
         }
@@ -219,11 +243,12 @@ class CharacterRepository(
         val zeroIndex = data.indexOf(0)
         if (zeroIndex <= 0) return null
         val keyword = String(data, 0, zeroIndex, StandardCharsets.ISO_8859_1)
-        if (keyword.lowercase() !in setOf("chara", "ccv3")) return null
+        if (keyword.lowercase() !in setOf("chara", "ccv3", "character")) return null
 
         val rawText = when (type) {
             "tEXt" -> String(data, zeroIndex + 1, data.size - zeroIndex - 1, StandardCharsets.ISO_8859_1)
             "iTXt" -> extractInternationalTextValue(data, zeroIndex + 1)
+            "zTXt" -> extractCompressedTextValue(data, zeroIndex + 1)
             else -> null
         }?.trim().orEmpty()
 
@@ -234,23 +259,41 @@ class CharacterRepository(
     private fun extractInternationalTextValue(data: ByteArray, startIndex: Int): String? {
         var index = startIndex
         if (index + 2 >= data.size) return null
+        val compressionFlag = data[index].toInt() and 0xff
         index += 2
         while (index < data.size && data[index].toInt() != 0) index++
         index++
         while (index < data.size && data[index].toInt() != 0) index++
         index++
         if (index >= data.size) return null
-        return String(data, index, data.size - index, StandardCharsets.UTF_8)
+        val textBytes = data.copyOfRange(index, data.size)
+        return if (compressionFlag == 1) {
+            inflateText(textBytes, StandardCharsets.UTF_8)
+        } else {
+            String(textBytes, StandardCharsets.UTF_8)
+        }
+    }
+
+    private fun extractCompressedTextValue(data: ByteArray, startIndex: Int): String? {
+        if (startIndex >= data.size) return null
+        val compressedStart = startIndex + 1
+        if (compressedStart >= data.size) return null
+        return inflateText(data.copyOfRange(compressedStart, data.size), StandardCharsets.ISO_8859_1)
+    }
+
+    private fun inflateText(bytes: ByteArray, charset: java.nio.charset.Charset): String? {
+        return runCatching {
+            InflaterInputStream(ByteArrayInputStream(bytes)).bufferedReader(charset).use { it.readText() }
+        }.getOrNull()
     }
 
     private fun decodeCharacterPayload(rawText: String): String {
         if (rawText.startsWith("{") || rawText.startsWith("[")) return rawText
         val normalized = rawText.replace("\n", "").replace("\r", "")
-        return runCatching {
-            String(Base64.decode(normalized, Base64.DEFAULT), Charsets.UTF_8)
-        }.getOrElse {
-            error("PNG 里的角色卡 metadata 不是可识别的 JSON/base64")
-        }
+        val decoded = sequenceOf(Base64.DEFAULT, Base64.URL_SAFE or Base64.NO_WRAP)
+            .mapNotNull { flags -> runCatching { String(Base64.decode(normalized, flags), Charsets.UTF_8) }.getOrNull() }
+            .firstOrNull { it.trimStart().startsWith("{") || it.trimStart().startsWith("[") }
+        return decoded ?: error("PNG 里的角色卡 metadata 不是可识别的 JSON/base64")
     }
 }
 

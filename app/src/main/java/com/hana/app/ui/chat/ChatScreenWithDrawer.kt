@@ -13,8 +13,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -23,7 +25,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
@@ -45,6 +49,7 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Wallpaper
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Surface
 import androidx.compose.material3.DrawerValue
@@ -58,6 +63,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -86,12 +93,15 @@ import androidx.compose.ui.unit.dp
 import com.hana.app.R
 import com.hana.app.data.db.entity.CharacterCardEntity
 import com.hana.app.data.db.entity.ChatMessageEntity
+import com.hana.app.data.db.entity.isGroupConversation
 import com.hana.app.ui.chat.ChatAttachment
 import com.hana.app.ui.character.CharacterAvatar
 import com.hana.app.ui.image.ImageChatPanel
 import com.hana.app.ui.sidebar.ConversationDrawer
 import com.hana.app.viewmodel.ChatUiState
 import com.hana.app.viewmodel.ImageGenerationUiState
+import com.hana.app.viewmodel.PromptPreviewState
+import com.hana.app.data.settings.InterCharacterRelationState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -150,17 +160,25 @@ fun ChatScreenWithDrawer(
     onStopImageGeneration: () -> Unit = {},
     onSaveGeneratedImage: (String) -> Unit = {},
     onReuseImagePrompt: (com.hana.app.viewmodel.ImageConversationItem) -> Unit = {},
-    onContinueImageFromResult: (com.hana.app.viewmodel.ImageConversationItem, String) -> Unit = { _, _ -> }
+    onContinueImageFromResult: (com.hana.app.viewmodel.ImageConversationItem, String) -> Unit = { _, _ -> },
+    promptPreviewState: PromptPreviewState = PromptPreviewState(),
+    onRefreshPromptPreview: () -> Unit = {},
+    interCharacterRelations: Map<String, InterCharacterRelationState> = emptyMap(),
+    onUpdateGroupScene: (String, String, Boolean) -> Unit = { _, _, _ -> },
+    onNavigateBack: (() -> Unit)? = null,
+    appDisplayName: String = "Hana"
 ) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
     val currentConversation = uiState.conversations.firstOrNull { it.id == uiState.currentConversationId }
+    val isUniverseMode = onNavigateBack != null
+    val isGroupChat = currentConversation?.isGroupConversation() == true
     val groupParticipants = remember(currentConversation, uiState.characters) {
-        if (currentConversation?.conversationType != "group") {
+        if (!isGroupChat) {
             emptyList()
         } else {
-            currentConversation.participantCharacterIds
+            currentConversation?.participantCharacterIds
                 .orEmpty()
                 .split(',')
                 .map { it.trim() }
@@ -173,6 +191,9 @@ fun ChatScreenWithDrawer(
     var isEditingTitle by remember { mutableStateOf(false) }
     var editingTitleValue by remember { mutableStateOf("") }
     var topBarMenuExpanded by remember { mutableStateOf(false) }
+    var showPromptPreview by remember { mutableStateOf(false) }
+    var showRelationGraph by remember { mutableStateOf(false) }
+    var showGroupSceneEditor by remember { mutableStateOf(false) }
 
     LaunchedEffect(networkBannerState) {
         if (networkBannerState != NetworkBannerState.Connected) {
@@ -201,6 +222,7 @@ fun ChatScreenWithDrawer(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
+        gesturesEnabled = !isUniverseMode,
         drawerContent = {
             ConversationDrawer(
                 conversations = uiState.conversations,
@@ -224,25 +246,44 @@ fun ChatScreenWithDrawer(
     ) {
         Scaffold(
             topBar = {
-                Surface(color = MaterialTheme.colorScheme.surface.copy(alpha = 0.99f), tonalElevation = 0.dp, shadowElevation = 0.dp) {
+                Surface(
+                    color = Color.Transparent,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    tonalElevation = 0.dp,
+                    shadowElevation = 0.dp
+                ) {
                     Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                Icon(Icons.Filled.Menu, contentDescription = stringResource(R.string.chat_cd_open_conversations))
+                            IconButton(onClick = {
+                                if (onNavigateBack != null) onNavigateBack() else scope.launch { drawerState.open() }
+                            }) {
+                                Icon(
+                                    if (onNavigateBack != null) Icons.AutoMirrored.Filled.ArrowBack else Icons.Filled.Menu,
+                                    contentDescription = if (onNavigateBack != null) "返回角色宇宙" else stringResource(R.string.chat_cd_open_conversations),
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
                             }
                             Column(Modifier.weight(1f).padding(start = 2.dp)) {
                                 Text(
-                                    text = if (imageModeEnabled) stringResource(R.string.chat_title_image) else stringResource(R.string.chat_title_main),
+                                    text = when {
+                                        imageModeEnabled -> stringResource(R.string.chat_title_image)
+                                        onNavigateBack != null -> currentConversation?.title ?: stringResource(R.string.chat_title_main)
+                                        else -> appDisplayName.ifBlank { stringResource(R.string.chat_title_main) }
+                                    },
                                     style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
-                                Text(
-                                    text = if (imageModeEnabled) stringResource(R.string.chat_subtitle_image) else (currentConversation?.title ?: stringResource(R.string.chat_subtitle_new)),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                if (!isUniverseMode) {
+                                    Text(
+                                        text = if (imageModeEnabled) stringResource(R.string.chat_subtitle_image)
+                                        else currentConversation?.title ?: stringResource(R.string.chat_subtitle_new),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
-                            if (!imageModeEnabled && currentConversation != null && !isEditingTitle) {
+                            if (!isUniverseMode && !imageModeEnabled && currentConversation != null && !isEditingTitle) {
                                 IconButton(
                                     onClick = {
                                         editingTitleValue = currentConversation.title
@@ -250,7 +291,7 @@ fun ChatScreenWithDrawer(
                                     },
                                     modifier = Modifier.size(36.dp)
                                 ) {
-                                    Icon(Icons.Filled.Edit, contentDescription = stringResource(R.string.chat_cd_edit_title), modifier = Modifier.size(18.dp))
+                                    Icon(Icons.Filled.Edit, contentDescription = stringResource(R.string.chat_cd_edit_title), modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
                             Box {
@@ -266,8 +307,19 @@ fun ChatScreenWithDrawer(
                                     expanded = topBarMenuExpanded,
                                     onDismissRequest = { topBarMenuExpanded = false }
                                 ) {
+                                    if (isUniverseMode && currentConversation != null) {
+                                        androidx.compose.material3.DropdownMenuItem(
+                                            text = { Text("重命名") },
+                                            onClick = {
+                                                topBarMenuExpanded = false
+                                                editingTitleValue = currentConversation.title
+                                                isEditingTitle = true
+                                            },
+                                            leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) }
+                                        )
+                                    }
                                     androidx.compose.material3.DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.chat_cd_preferences)) },
+                                        text = { Text(if (personaEnabled) "停用全局偏好" else "启用全局偏好") },
                                         onClick = {
                                             topBarMenuExpanded = false
                                             onTogglePersona()
@@ -281,8 +333,57 @@ fun ChatScreenWithDrawer(
                                         }
                                     )
                                     if (!imageModeEnabled) {
+                                        if (isGroupChat) {
+                                            androidx.compose.material3.DropdownMenuItem(
+                                                text = { Text("参与角色：${groupParticipants.size} 位") },
+                                                onClick = { topBarMenuExpanded = false },
+                                                leadingIcon = { Icon(Icons.Filled.Star, contentDescription = null) }
+                                            )
+                                            androidx.compose.material3.DropdownMenuItem(
+                                                text = { Text("设定共同场景") },
+                                                onClick = {
+                                                    topBarMenuExpanded = false
+                                                    showGroupSceneEditor = true
+                                                },
+                                                leadingIcon = { Icon(Icons.Filled.Wallpaper, contentDescription = null) }
+                                            )
+                                            androidx.compose.material3.DropdownMenuItem(
+                                                text = { Text("查看角色关系图") },
+                                                onClick = {
+                                                    topBarMenuExpanded = false
+                                                    showRelationGraph = true
+                                                },
+                                                leadingIcon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null) }
+                                            )
+                                        }
                                         androidx.compose.material3.DropdownMenuItem(
-                                            text = { Text(stringResource(R.string.chat_chip_clear_bg)) },
+                                            text = { Text("查看最终 Prompt") },
+                                            onClick = {
+                                                topBarMenuExpanded = false
+                                                showPromptPreview = true
+                                                onRefreshPromptPreview()
+                                            }
+                                        )
+                                        if (isUniverseMode) {
+                                            androidx.compose.material3.DropdownMenuItem(
+                                                text = { Text("背景库") },
+                                                onClick = {
+                                                    topBarMenuExpanded = false
+                                                    onOpenBackgroundLibrary()
+                                                },
+                                                leadingIcon = { Icon(Icons.Filled.Wallpaper, contentDescription = null) }
+                                            )
+                                            androidx.compose.material3.DropdownMenuItem(
+                                                text = { Text("更换全局背景") },
+                                                onClick = {
+                                                    topBarMenuExpanded = false
+                                                    onPickBackground()
+                                                },
+                                                leadingIcon = { Icon(Icons.Filled.Wallpaper, contentDescription = null) }
+                                            )
+                                        }
+                                        androidx.compose.material3.DropdownMenuItem(
+                                            text = { Text(if (isUniverseMode) "清除全局背景" else stringResource(R.string.chat_chip_clear_bg)) },
                                             onClick = {
                                                 topBarMenuExpanded = false
                                                 onClearBackground()
@@ -290,12 +391,34 @@ fun ChatScreenWithDrawer(
                                             leadingIcon = { Icon(Icons.Filled.Close, contentDescription = null) }
                                         )
                                     }
+                                    if (!isUniverseMode) {
+                                        androidx.compose.material3.DropdownMenuItem(
+                                            text = { Text(if (imageModeEnabled) "切换到对话" else "切换到生图") },
+                                            onClick = {
+                                                topBarMenuExpanded = false
+                                                onToggleImageMode()
+                                            },
+                                            leadingIcon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null) }
+                                        )
+                                        androidx.compose.material3.DropdownMenuItem(
+                                            text = { Text("背景库") },
+                                            onClick = {
+                                                topBarMenuExpanded = false
+                                                onOpenBackgroundLibrary()
+                                            },
+                                            leadingIcon = { Icon(Icons.Filled.Wallpaper, contentDescription = null) }
+                                        )
+                                        androidx.compose.material3.DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.chat_chip_main_bg)) },
+                                            onClick = {
+                                                topBarMenuExpanded = false
+                                                onPickBackground()
+                                            },
+                                            leadingIcon = { Icon(Icons.Filled.Wallpaper, contentDescription = null) }
+                                        )
+                                    }
                                 }
                             }
-                        }
-
-                        if (!imageModeEnabled && groupParticipants.isNotEmpty()) {
-                            GroupParticipantStrip(participants = groupParticipants)
                         }
 
                         if (isEditingTitle) {
@@ -339,42 +462,8 @@ fun ChatScreenWithDrawer(
                             }
                         }
 
-                        Row(
-                            modifier = Modifier.padding(top = 2.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            FilterChip(
-                                selected = !imageModeEnabled,
-                                onClick = {
-                                    if (imageModeEnabled) onToggleImageMode()
-                                },
-                                label = { Text(stringResource(R.string.chat_chip_mode_chat)) },
-                                leadingIcon = if (!imageModeEnabled) ({ Icon(Icons.Filled.AutoAwesome, null, modifier = Modifier.size(16.dp)) }) else null
-                            )
-                            FilterChip(
-                                selected = imageModeEnabled,
-                                onClick = {
-                                    if (!imageModeEnabled) onToggleImageMode()
-                                },
-                                label = { Text(stringResource(R.string.chat_chip_mode_image)) },
-                                leadingIcon = if (imageModeEnabled) ({ Icon(Icons.Filled.AutoAwesome, null, modifier = Modifier.size(16.dp)) }) else null
-                            )
-                            if (!imageModeEnabled) {
-                                Spacer(Modifier.weight(1f))
-                                AssistChip(
-                                    onClick = onOpenBackgroundLibrary,
-                                    label = { Text("背景库") },
-                                    leadingIcon = { Icon(Icons.Filled.Wallpaper, null, modifier = Modifier.size(16.dp)) }
-                                )
-                                AssistChip(
-                                    onClick = onPickBackground,
-                                    label = { Text(stringResource(R.string.chat_chip_main_bg)) },
-                                    leadingIcon = { Icon(Icons.Filled.Wallpaper, null, modifier = Modifier.size(16.dp)) }
-                                )
-                            }
-                        }
-                        HorizontalDivider(modifier = Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.38f))
+
                     }
                 }
             },
@@ -383,15 +472,7 @@ fun ChatScreenWithDrawer(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(
-                        brush = androidx.compose.ui.graphics.Brush.verticalGradient(
-                            colors = listOf(
-                                MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
-                                MaterialTheme.colorScheme.background,
-                                MaterialTheme.colorScheme.background
-                            )
-                        )
-                    )
+                    .background(MaterialTheme.colorScheme.background)
                     .padding(innerPadding)
             ) {
                 NetworkStatusNotification(
@@ -455,10 +536,169 @@ fun ChatScreenWithDrawer(
             }
         }
     }
+    if (showPromptPreview) {
+        PromptPreviewDialog(
+            state = promptPreviewState,
+            onRefresh = onRefreshPromptPreview,
+            onDismiss = { showPromptPreview = false }
+        )
+    }
+    if (showRelationGraph && isGroupChat) {
+        InterCharacterRelationsDialog(
+            participants = groupParticipants,
+            relations = interCharacterRelations,
+            onDismiss = { showRelationGraph = false }
+        )
+    }
+    if (showGroupSceneEditor && isGroupChat) {
+        currentConversation?.let { conversation ->
+            GroupSceneEditorDialog(
+                initialScene = conversation.groupScene.orEmpty(),
+                initialLocked = conversation.groupSceneLocked,
+                onDismiss = { showGroupSceneEditor = false },
+                onSave = { scene, locked ->
+                    onUpdateGroupScene(conversation.id, scene, locked)
+                    showGroupSceneEditor = false
+                }
+            )
+        }
+    }
 }
 
 @Composable
-private fun GroupParticipantStrip(participants: List<CharacterCardEntity>) {
+private fun GroupSceneEditorDialog(
+    initialScene: String,
+    initialLocked: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String, Boolean) -> Unit
+) {
+    var scene by remember(initialScene) { mutableStateOf(initialScene) }
+    var locked by remember(initialLocked) { mutableStateOf(initialLocked) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("设定共同场景") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "所有角色会共享这里公开发生的动作和台词。强制同场开启后，不管角色原本人设如何，都不能自行离开这个空间。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = scene,
+                    onValueChange = { scene = it },
+                    label = { Text("地点、时间、氛围与事件规则") },
+                    placeholder = { Text("例如：暴雨夜的山间别墅客厅，门窗已经锁住。三人必须在这里等到天亮。") },
+                    minLines = 5,
+                    maxLines = 10,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("强制同场", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "禁止离场、回家、消失、跳转地点或把其他角色写出场",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(checked = locked, onCheckedChange = { locked = it })
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = { onSave(scene.trim(), locked) }) { Text("保存场景") }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+@Composable
+private fun InterCharacterRelationsDialog(
+    participants: List<CharacterCardEntity>,
+    relations: Map<String, InterCharacterRelationState>,
+    onDismiss: () -> Unit
+) {
+    val pairs = buildList {
+        participants.forEach { from ->
+            participants.forEach { to ->
+                if (from.id != to.id) {
+                    val key = "${from.id}->${to.id}"
+                    add(from to (to to relations[key]))
+                }
+            }
+        }
+    }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("角色关系图") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "这是角色对角色的长期关系，不代表用户与角色的好感。只有明确引用并回应时才会更新。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (pairs.isEmpty()) {
+                    Text("当前群聊没有足够的角色关系数据。")
+                } else {
+                    pairs.forEach { (from, targetPair) ->
+                        val (to, state) = targetPair
+                        val relation = state ?: InterCharacterRelationState()
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp)
+                        ) {
+                            Column(Modifier.padding(12.dp)) {
+                                Text(
+                                    "${from.name}  →  ${to.name}",
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    "${relation.relationLabel} · 亲近 ${relation.affinity} · 竞争 ${relation.rivalry} · 紧张 ${relation.tension}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                if (relation.recentEvent.isNotBlank()) {
+                                    Text(
+                                        relation.recentEvent,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
+}
+
+@Composable
+private fun GroupParticipantStrip(
+    participants: List<CharacterCardEntity>,
+    scene: String,
+    sceneLocked: Boolean,
+    onEditScene: () -> Unit
+) {
     Row(
         modifier = Modifier
             .padding(top = 8.dp)
@@ -468,7 +708,12 @@ private fun GroupParticipantStrip(participants: List<CharacterCardEntity>) {
     ) {
         Surface(
             shape = androidx.compose.foundation.shape.RoundedCornerShape(999.dp),
-            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+            color = if (sceneLocked) {
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
+            } else {
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+            },
+            modifier = Modifier.clickable(onClick = onEditScene)
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -476,7 +721,17 @@ private fun GroupParticipantStrip(participants: List<CharacterCardEntity>) {
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
-                Text("群聊中", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                Text(
+                    when {
+                        scene.isBlank() -> "设定共同场景"
+                        sceneLocked -> "场景已锁定 · ${scene.lineSequence().firstOrNull().orEmpty().take(18)}"
+                        else -> "共同场景 · ${scene.lineSequence().firstOrNull().orEmpty().take(18)}"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1
+                )
             }
         }
         participants.forEach { participant ->
@@ -596,7 +851,7 @@ private fun NetworkStatusNotification(
 ) {
     val haptic = LocalHapticFeedback.current
     var lastHapticState by remember { mutableStateOf(NetworkBannerState.Connected) }
-    val visible = state != NetworkBannerState.Connected || dismissedState != state
+    val visible = state != NetworkBannerState.Connected && dismissedState != state
 
     LaunchedEffect(state) {
         if (state != lastHapticState) {
@@ -610,19 +865,9 @@ private fun NetworkStatusNotification(
         }
     }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "networkBanner")
-    val disconnectedAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.55f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "networkBannerAlpha"
-    )
     val targetColor = when (state) {
-        NetworkBannerState.Disconnected -> MaterialTheme.colorScheme.error.copy(alpha = disconnectedAlpha)
-        NetworkBannerState.Reconnected -> Color(0xFF2E7D32)
+        NetworkBannerState.Disconnected -> MaterialTheme.colorScheme.error
+        NetworkBannerState.Reconnected -> MaterialTheme.colorScheme.primary
         NetworkBannerState.Connected -> Color.Transparent
     }
     val color by animateColorAsState(
@@ -632,12 +877,12 @@ private fun NetworkStatusNotification(
     )
     val containerColor = when (state) {
         NetworkBannerState.Disconnected -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.96f)
-        NetworkBannerState.Reconnected -> Color(0xFFE8F5E9)
+        NetworkBannerState.Reconnected -> MaterialTheme.colorScheme.primaryContainer
         NetworkBannerState.Connected -> MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)
     }
     val contentColor = when (state) {
         NetworkBannerState.Disconnected -> MaterialTheme.colorScheme.onErrorContainer
-        NetworkBannerState.Reconnected -> Color(0xFF1B5E20)
+        NetworkBannerState.Reconnected -> MaterialTheme.colorScheme.onPrimaryContainer
         NetworkBannerState.Connected -> MaterialTheme.colorScheme.onSurface
     }
 
@@ -655,13 +900,13 @@ private fun NetworkStatusNotification(
         Box(modifier = modifier.fillMaxWidth()) {
             Surface(
                 color = containerColor,
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
-                shadowElevation = if (state == NetworkBannerState.Connected) 6.dp else 14.dp,
-                tonalElevation = if (state == NetworkBannerState.Connected) 2.dp else 6.dp,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                shadowElevation = 0.dp,
+                tonalElevation = 1.dp,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .fillMaxWidth(if (state == NetworkBannerState.Connected) 0.72f else 0.92f)
-                    .widthIn(max = if (state == NetworkBannerState.Connected) 280.dp else 420.dp)
+                    .fillMaxWidth(0.92f)
+                    .widthIn(max = 420.dp)
             ) {
                 Row(
                     modifier = Modifier.padding(start = 14.dp, top = 12.dp, end = 8.dp, bottom = 12.dp),

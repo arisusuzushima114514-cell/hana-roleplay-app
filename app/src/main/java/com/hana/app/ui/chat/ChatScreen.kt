@@ -1,10 +1,18 @@
 package com.hana.app.ui.chat
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
 import android.widget.Toast
+import com.hana.app.ui.theme.LocalHanaBubbleColors
+import com.hana.app.ui.theme.LocalHanaBubbleImages
+import com.hana.app.ui.theme.LocalHanaChatDisplaySettings
+import com.hana.app.ui.theme.NineSliceImage
+import com.hana.app.ui.theme.hanaChatDensityMetrics
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.animateContentSize
@@ -72,6 +80,7 @@ import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -117,14 +126,17 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
+import java.io.File
 import com.hana.app.R
 import com.hana.app.data.db.entity.ChatMessageEntity
+import com.hana.app.data.db.entity.isGroupConversation
 import com.hana.app.data.db.entity.ConversationEntity
 import com.hana.app.data.db.entity.ModelInfo
 import com.hana.app.ui.character.CharacterAvatar
@@ -188,7 +200,7 @@ fun ChatScreen(
     val displayMessages = buildList {
         val visibleHistory = uiState.messages.takeLast(loadedMessageCount)
         addAll(visibleHistory)
-        uiState.streamingAssistant?.let {
+        uiState.streamingAssistant?.takeIf { it.conversationId == uiState.currentConversationId }?.let {
             add(ChatMessageEntity(
                 id = Long.MIN_VALUE, conversationId = uiState.currentConversationId.orEmpty(),
                 role = "assistant", speakerCharacterId = it.speakerCharacterId, speakerName = it.speakerName, content = it.content,
@@ -199,6 +211,14 @@ fun ChatScreen(
     val bottomAnchorIndex = maxOf(0, displayMessages.size - 1)
     val density = LocalDensity.current
     val bottomContentPadding = with(density) { inputBarHeightPx.toDp() } + 24.dp
+    val chatDisplay = LocalHanaChatDisplaySettings.current
+    val densityMetrics = hanaChatDensityMetrics(chatDisplay.density)
+    val messageSpacing = densityMetrics.messageSpacing
+    val messageTextStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = when (chatDisplay.fontSize) {
+        "small" -> 14.sp
+        "large" -> 18.sp
+        else -> 16.sp
+    })
 
     // 加载更多历史（滚动到顶部时触发）
     LaunchedEffect(displayMessages.size, hasMoreHistory) {
@@ -252,7 +272,7 @@ fun ChatScreen(
     }
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-        val maxBubbleWidth = maxWidth * 0.75f
+        val maxBubbleWidth = maxWidth * (chatDisplay.bubbleWidthPercent / 100f)
 
         ChatBackgroundArtwork(uiState.backgroundBitmap, backgroundIntensity)
 
@@ -268,7 +288,7 @@ fun ChatScreen(
                     end = 16.dp,
                     bottom = bottomContentPadding
                 ),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(messageSpacing)
             ) {
                 items(displayMessages, key = { it.id }) { message ->
                     val isStreaming = message.id == Long.MIN_VALUE
@@ -294,7 +314,7 @@ fun ChatScreen(
                             } else {
                                 null
                             },
-                            maxWidth = maxBubbleWidth,
+                             maxWidth = maxBubbleWidth,
                             onDeleteMessage = onDeleteMessage,
                             onRegenerateMessage = onRegenerateMessage,
                             onEditMessage = onEditMessage,
@@ -305,7 +325,8 @@ fun ChatScreen(
                             onToggleFavorite = onToggleFavorite,
                             speakerAvatarUrl = message.speakerCharacterId?.let(characterAvatarById::get),
                             showInnerThoughtEntry = showInnerThoughtEntry,
-                            snackbarHostState = snackbarHostState
+                             snackbarHostState = snackbarHostState,
+                             textStyle = messageTextStyle
                         )
                     }
                     if (!isStreaming && message.id == contextCutoffId && uiState.messages.count { it.role != "system" }                         > (currentConversation?.contextLimit ?: 999)) {
@@ -512,8 +533,12 @@ private fun MessageBubble(
     speakerAvatarUrl: String?,
     showInnerThoughtEntry: Boolean,
     snackbarHostState: SnackbarHostState
+    ,textStyle: androidx.compose.ui.text.TextStyle
 ) {
     val isUser = message.role == "user"
+    val bubbleColors = LocalHanaBubbleColors.current
+    val bubbleImages = LocalHanaBubbleImages.current
+    val chatDisplay = LocalHanaChatDisplaySettings.current
     val isStreaming = message.id == Long.MIN_VALUE
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
@@ -558,31 +583,41 @@ private fun MessageBubble(
                 Surface(
                     shape = if (isUser) {
                         RoundedCornerShape(
-                            topStart = 20.dp,
-                            topEnd = 20.dp,
-                            bottomStart = 20.dp,
-                            bottomEnd = 8.dp
+                            topStart = bubbleColors.userCorner,
+                            topEnd = bubbleColors.userCorner,
+                            bottomStart = bubbleColors.userCorner,
+                            bottomEnd = bubbleColors.userTailCorner
                         )
                     } else {
-                        RoundedCornerShape(24.dp)
+                        RoundedCornerShape(bubbleColors.aiCorner)
                     },
                     color = if (isUser) {
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.96f)
+                        bubbleColors.userBubble
                     } else {
-                        MaterialTheme.colorScheme.surface.copy(alpha = 0.98f)
+                        bubbleColors.aiBubble
                     },
-                    tonalElevation = if (isUser) 0.dp else 2.dp,
-                    shadowElevation = if (isUser) 0.dp else 4.dp,
+                    tonalElevation = 0.dp,
+                    shadowElevation = 0.dp,
                     modifier = Modifier
                         .widthIn(max = if (isUser) maxWidth else maxWidth * 1.08f)
                         .animateContentSize()
                 ) {
+                    val bubbleImagePath = if (isUser) bubbleImages.userPath else bubbleImages.aiPath
+                    val bubbleImageFile = bubbleImagePath.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.isFile }
+                    if (bubbleImageFile != null) {
+                        NineSliceImage(
+                            path = bubbleImageFile.absolutePath,
+                            fixedEdgePercent = if (isUser) bubbleImages.userFixedEdgePercent else bubbleImages.aiFixedEdgePercent,
+                            modifier = Modifier.matchParentSize()
+                        )
+                        Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.26f)))
+                    }
                     val rawText = decodedContent.text.ifBlank {
                         if (!isUser && streamingStartAt != null) "..." else ""
                     }
                     val shouldCollapse = rawText.length > 500 && !expanded && !isStreaming
                     val displayText = if (shouldCollapse) rawText.take(200) else rawText
-                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                     Column(modifier = Modifier.padding(horizontal = if (chatDisplay.density == "comfortable") 18.dp else 16.dp, vertical = when (chatDisplay.density) { "compact" -> 8.dp; "comfortable" -> 14.dp; else -> 12.dp })) {
                         if (!isUser) {
                             Row(
                                 modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
@@ -593,9 +628,9 @@ private fun MessageBubble(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    if (!speakerAvatarUrl.isNullOrBlank()) {
+                                    if (chatDisplay.showAvatars && !speakerAvatarUrl.isNullOrBlank()) {
                                         CharacterAvatar(avatarUrl = speakerAvatarUrl, modifier = Modifier.size(24.dp))
-                                    } else {
+                                    } else if (chatDisplay.showAvatars) {
                                         Surface(
                                             shape = RoundedCornerShape(999.dp),
                                             color = MaterialTheme.colorScheme.primaryContainer,
@@ -659,16 +694,56 @@ private fun MessageBubble(
                                 }
                             }
                         }
+                        if (!message.replyToSpeakerName.isNullOrBlank() || !message.replyToContent.isNullOrBlank()) {
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 8.dp),
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
+                            ) {
+                                Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                                    Surface(
+                                        modifier = Modifier.width(3.dp).heightIn(min = 36.dp),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        shape = RoundedCornerShape(99.dp)
+                                    ) {}
+                                    Column(Modifier.padding(start = 8.dp)) {
+                                        Text(
+                                            text = "回复 ${message.replyToSpeakerName ?: "上一条消息"}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = message.replyToContent.orEmpty().replace(Regex("<inner>.*?</inner>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "").trim().take(100),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         SelectionContainer {
                             MessageContent(
                                 text = displayText + if (isStreaming) blinkingCursor() else "",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (isUser) {
-                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                style = textStyle,
+                                color = if (bubbleImageFile != null) Color.White else if (isUser) {
+                                    bubbleColors.userBubbleOnSurface
                                 } else {
-                                    MaterialTheme.colorScheme.onSurface
+                                    bubbleColors.aiBubbleOnSurface
                                 },
                                 snackbarHostState = snackbarHostState
+                            )
+                        }
+                        if (chatDisplay.showTime && !isStreaming) {
+                            Text(
+                                java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(message.timestamp)),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = (if (isUser) bubbleColors.userBubbleOnSurface else bubbleColors.aiBubbleOnSurface).copy(alpha = 0.62f),
+                                modifier = Modifier.align(Alignment.End)
                             )
                         }
                         if (decodedContent.attachments.isNotEmpty()) {
@@ -1414,6 +1489,7 @@ private fun ChatInputBar(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val chatDisplay = LocalHanaChatDisplaySettings.current
     var showParameters by remember { mutableStateOf(false) }
     var showAttachSheet by remember { mutableStateOf(false) }
     var pendingAttachments by remember { mutableStateOf<List<ChatAttachment>>(emptyList()) }
@@ -1445,7 +1521,6 @@ private fun ChatInputBar(
     val cameraUploadLabel = stringResource(R.string.photo)
     val moreActionsLabel = stringResource(R.string.more_actions)
     val webSearchLabel = stringResource(R.string.web_search)
-    val haptic = LocalHapticFeedback.current
     val stopLabel = stringResource(R.string.stop)
     val imageNotSupportedMessage = stringResource(R.string.image_not_supported)
     val fileNotSupportedMessage = stringResource(R.string.file_not_supported)
@@ -1459,16 +1534,18 @@ private fun ChatInputBar(
         }
         val toAdd = newUris.take(remaining)
         var added = 0
+        var completed = 0
         toAdd.forEach { uri ->
             onPersistImageAttachment(uri) { attachment ->
                 if (attachment != null) {
                     pendingAttachments = pendingAttachments + attachment
                     added++
                 }
+                completed++
+                if (completed == toAdd.size && added == 0) {
+                    Toast.makeText(context, "图片添加失败", Toast.LENGTH_SHORT).show()
+                }
             }
-        }
-        if (added == 0 && toAdd.isNotEmpty()) {
-            Toast.makeText(context, "图片添加失败", Toast.LENGTH_SHORT).show()
         }
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -1486,6 +1563,10 @@ private fun ChatInputBar(
                 else Toast.makeText(context, "拍照添加失败", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) cameraLauncher.launch(null)
+        else Toast.makeText(context, "拍照需要相机权限", Toast.LENGTH_SHORT).show()
     }
     fun submitMessage() {
         if (pendingAttachments.isEmpty()) {
@@ -1505,18 +1586,7 @@ private fun ChatInputBar(
         name.contains("vision") || name.contains("-vl") || name.startsWith("gpt-4o") || name.startsWith("gemini-") || name.startsWith("claude-") || name.startsWith("grok-")
     }
     val fileCapabilityEnabled = supportsFile || hasVisionConfig || imageCapabilityEnabled
-    val capabilityHint = when {
-        imageCapabilityEnabled && fileCapabilityEnabled -> "当前模型支持图片与文件"
-        imageCapabilityEnabled -> "当前模型支持图片输入"
-        fileCapabilityEnabled -> "当前模型支持文件输入"
-        else -> "当前模型仅支持文本"
-    }
-    val isGroupConversation = currentConversation?.conversationType == "group"
-    val groupReplyHint = if (isGroupConversation) {
-        "群聊模式：可直接 @角色名 或提到名字点名，未点名时会自动选择 2~3 个角色回复"
-    } else {
-        null
-    }
+    val isGroupConversation = currentConversation?.isGroupConversation() == true
 
     val actionScale by animateFloatAsState(
         targetValue = if (isSending) 0.96f else 1f,
@@ -1525,66 +1595,19 @@ private fun ChatInputBar(
     )
 
     Surface(
-        shadowElevation = 8.dp,
-        shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp, bottomStart = 0.dp, bottomEnd = 0.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+        shadowElevation = 0.dp,
+        shape = RoundedCornerShape(0.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
         modifier = modifier.fillMaxWidth()
     ) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
                 .imePadding()
-                .padding(horizontal = 16.dp, vertical = 14.dp)
+                .padding(horizontal = 8.dp, vertical = when (chatDisplay.inputBarSize) { "compact" -> 3.dp; "comfortable" -> 10.dp; else -> 6.dp })
         ) {
-            Row(modifier = Modifier.padding(bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    onClick = onOpenModelPicker,
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.36f)
-                ) {
-                    Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(effectiveDisplayedModel.ifBlank { "选择模型" }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                // 模型联网能力指示灯
-                Surface(
-                    shape = RoundedCornerShape(4.dp),
-                    color = if (modelSupportsWebSearch) Color(0xFF16A34A).copy(alpha = 0.15f) else Color(0xFF9CA3AF).copy(alpha = 0.12f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = if (modelSupportsWebSearch) Color(0xFF16A34A) else Color(0xFF9CA3AF),
-                            modifier = Modifier.size(7.dp)
-                        ) {}
-                        Text(
-                            if (modelSupportsWebSearch) "联网" else "离线",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (modelSupportsWebSearch) Color(0xFF15803D) else Color(0xFF6B7280)
-                        )
-                    }
-                }
-            }
-            Text(
-                text = capabilityHint,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-            if (!groupReplyHint.isNullOrBlank()) {
-                Text(
-                    text = groupReplyHint,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
-            }
             if (pendingAttachments.isNotEmpty()) {
                 AttachmentThumbnailRow(
                     attachments = pendingAttachments,
@@ -1598,19 +1621,34 @@ private fun ChatInputBar(
                 )
             }
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { showAttachSheet = true }, modifier = Modifier.size(38.dp)) {
+                    Icon(Icons.Filled.Add, moreActionsLabel, modifier = Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 Box(modifier = Modifier.weight(1f)) {
                     OutlinedTextField(
                         value = value, onValueChange = onValueChange,
-                        placeholder = { Text(stringResource(R.string.input_message)) },
-                        enabled = !isSending, maxLines = 5, minLines = 1,
-                        modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp)
+                         placeholder = { Text(stringResource(R.string.input_message)) },
+                         enabled = !isSending,
+                         maxLines = when (chatDisplay.inputBarSize) { "compact" -> 3; "comfortable" -> 7; else -> 5 },
+                         minLines = when (chatDisplay.inputBarSize) { "comfortable" -> 3; "standard" -> 2; else -> 1 },
+                         textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = when (chatDisplay.fontSize) { "small" -> 14.sp; "large" -> 18.sp; else -> 16.sp }),
+                        modifier = Modifier
+                            .fillMaxWidth(chatDisplay.inputBarWidthPercent.coerceIn(70, 100) / 100f)
+                            .heightIn(min = when (chatDisplay.inputBarSize) { "compact" -> 52.dp; "comfortable" -> 92.dp; else -> 68.dp })
+                            .align(Alignment.Center),
+                        shape = RoundedCornerShape(24.dp),
+                        trailingIcon = {
+                            IconButton(onClick = onToggleWebSearch, modifier = Modifier.size(36.dp)) {
+                                Icon(Icons.Filled.Public, webSearchLabel, modifier = Modifier.size(18.dp), tint = if (webSearchEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f))
+                            }
+                        }
                     )
                 }
                 Spacer(modifier = Modifier.size(6.dp))
                 if (isSending) {
                     IconButton(
                         onClick = onStop,
-                        modifier = Modifier.size(44.dp).graphicsLayer {
+                        modifier = Modifier.size(40.dp).graphicsLayer {
                             scaleX = actionScale
                             scaleY = actionScale
                         },
@@ -1622,7 +1660,7 @@ private fun ChatInputBar(
                     IconButton(
                         onClick = { submitMessage() },
                         enabled = value.isNotBlank() || pendingAttachments.isNotEmpty(),
-                        modifier = Modifier.size(48.dp).graphicsLayer {
+                        modifier = Modifier.size(40.dp).graphicsLayer {
                             scaleX = actionScale
                             scaleY = actionScale
                         },
@@ -1633,34 +1671,25 @@ private fun ChatInputBar(
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { showAttachSheet = true }, modifier = Modifier.size(34.dp)) {
-                    Icon(Icons.Filled.Add, moreActionsLabel, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
-                }
-                IconButton(onClick = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onToggleWebSearch()
-                }, modifier = Modifier.size(34.dp)) {
-                    Icon(Icons.Filled.Public, webSearchLabel, modifier = Modifier.size(18.dp),
-                        tint = if (webSearchEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
-                }
+            Row(modifier = Modifier.fillMaxWidth().padding(start = 44.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                 Surface(
-                    onClick = { showParameters = true },
-                    shape = RoundedCornerShape(14.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f)
+                    onClick = onOpenModelPicker,
+                    shape = RoundedCornerShape(999.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f)
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
-                        Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("参数", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Box(Modifier.size(6.dp).clip(androidx.compose.foundation.shape.CircleShape).background(if (modelSupportsWebSearch) Color(0xFF16A34A) else MaterialTheme.colorScheme.outline))
+                        Text(effectiveDisplayedModel.ifBlank { "选择模型" }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
+                }
+                if (isGroupConversation) Text(stringResource(R.string.chat_group_round), modifier = Modifier.padding(start = 8.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = { showParameters = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                    Text("参数", style = MaterialTheme.typography.labelSmall)
                 }
             }
         }
@@ -1675,7 +1704,11 @@ private fun ChatInputBar(
                             Toast.makeText(context, imageNotSupportedMessage, Toast.LENGTH_SHORT).show()
                         } else {
                             showAttachSheet = false
-                            cameraLauncher.launch(null)
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                cameraLauncher.launch(null)
+                            } else {
+                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                            }
                         }
                     }
                     AttachAction(Icons.Filled.ImageIcon, imageUploadLabel, enabled = imageCapabilityEnabled) {
@@ -1788,8 +1821,8 @@ private fun ChatInputBar(
                 Text("控制当前对话会带上多少轮最近消息。值越高，越能延续前文。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Slider(
                     value = contextLimit.toFloat(),
-                    onValueChange = { contextLimit = it.toInt().coerceIn(1, 999) },
-                    valueRange = 1f..999f
+                    onValueChange = { contextLimit = it.toInt().coerceIn(1, 120) },
+                    valueRange = 1f..120f
                 )
                 Button(
                     onClick = { showSystemPromptEditor = true },

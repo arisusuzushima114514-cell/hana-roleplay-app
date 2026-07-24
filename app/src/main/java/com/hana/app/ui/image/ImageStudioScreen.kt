@@ -1,6 +1,10 @@
 package com.hana.app.ui.image
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,7 +44,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -50,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.Alignment
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.hana.app.R
 import com.hana.app.viewmodel.ImageConversationItem
@@ -116,7 +124,25 @@ fun ImageChatPanel(
     onContinueFromImage: (ImageConversationItem, String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
+    var pendingImageToSave by remember { mutableStateOf<String?>(null) }
+    val storagePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val pending = pendingImageToSave
+        pendingImageToSave = null
+        if (granted && pending != null) onSaveImage(pending)
+        else if (!granted) Toast.makeText(context, "Android 9 及以下保存图片需要存储权限", Toast.LENGTH_SHORT).show()
+    }
+    fun saveImage(url: String) {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingImageToSave = url
+            storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else {
+            onSaveImage(url)
+        }
+    }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         if (uris.isNotEmpty()) onReferenceImagesPicked(uris)
     }
@@ -152,7 +178,7 @@ fun ImageChatPanel(
             items(uiState.messages, key = { it.id }) { message ->
                 GeneratedMessageCard(
                     message = message,
-                    onSaveImage = onSaveImage,
+                    onSaveImage = ::saveImage,
                     onReusePrompt = onReusePrompt,
                     onContinueFromImage = onContinueFromImage
                 )

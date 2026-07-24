@@ -12,6 +12,7 @@ import com.hana.app.data.settings.SettingsData
 import com.hana.app.data.settings.SettingsRepository
 import com.hana.app.data.settings.AppLanguage
 import com.hana.app.ui.theme.ThemeMode
+import com.hana.app.ui.theme.ThemePalette
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,9 +33,14 @@ data class SettingsUiState(
     val visionBaseUrl: String = "",
     val visionApiKey: String = "",
     val visionModelName: String = "",
+    val summaryBaseUrl: String = "",
+    val summaryApiKey: String = "",
+    val summaryModelName: String = "",
+    val autoSummaryThreshold: Int = com.hana.app.data.settings.DEFAULT_AUTO_SUMMARY_THRESHOLD,
     val supportsImage: Boolean = false,
     val supportsFile: Boolean = false,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    val themePalette: ThemePalette = ThemePalette.VIOLET,
     val voiceInputEnabled: Boolean = true,
     val streamEnabled: Boolean = true,
     val searchIndependentMode: Boolean = true,
@@ -46,6 +52,9 @@ data class SettingsUiState(
     val creativePresetText: String = "",
     val characterCreativePresetEnabled: Map<String, Boolean> = emptyMap(),
     val characterCreativePresetAffectsPersona: Map<String, Boolean> = emptyMap(),
+    val characterCreativePresetTexts: Map<String, String> = emptyMap(),
+    val characterIndependentCreativePresetEnabled: Map<String, Boolean> = emptyMap(),
+    val characterIndependentCreativePresetAffectsPersona: Map<String, Boolean> = emptyMap(),
     val autoThemeSuggestionEnabled: Boolean = true,
     val lastAutoThemeSuggestionTag: String = "",
     val imageProviderId: Long = 0L,
@@ -88,9 +97,14 @@ class SettingsViewModel(
                         visionBaseUrl = settings.visionBaseUrl,
                         visionApiKey = settings.visionApiKey,
                         visionModelName = settings.visionModelName,
+                        summaryBaseUrl = settings.summaryBaseUrl,
+                        summaryApiKey = settings.summaryApiKey,
+                        summaryModelName = settings.summaryModelName,
+                        autoSummaryThreshold = settings.autoSummaryThreshold,
                         supportsImage = settings.supportsImage,
                         supportsFile = settings.supportsFile,
                         themeMode = settings.themeMode,
+                        themePalette = settings.themePalette,
                         voiceInputEnabled = settings.voiceInputEnabled,
                         streamEnabled = settings.streamEnabled,
                         searchIndependentMode = settings.searchIndependentMode,
@@ -102,6 +116,9 @@ class SettingsViewModel(
                         creativePresetText = settings.creativePresetText,
                         characterCreativePresetEnabled = settings.characterCreativePresetEnabled,
                         characterCreativePresetAffectsPersona = settings.characterCreativePresetAffectsPersona,
+                        characterCreativePresetTexts = settings.characterCreativePresetTexts,
+                        characterIndependentCreativePresetEnabled = settings.characterIndependentCreativePresetEnabled,
+                        characterIndependentCreativePresetAffectsPersona = settings.characterIndependentCreativePresetAffectsPersona,
                         autoThemeSuggestionEnabled = settings.autoThemeSuggestionEnabled,
                         lastAutoThemeSuggestionTag = settings.lastAutoThemeSuggestionTag,
                         imageProviderId = settings.imageProviderId,
@@ -152,6 +169,11 @@ class SettingsViewModel(
         com.hana.app.ui.theme.applyThemeMode(mode)
     }
 
+    fun onThemePaletteChange(palette: ThemePalette) {
+        _uiState.update { it.copy(themePalette = palette) }
+        viewModelScope.launch { repository.saveThemePalette(palette) }
+    }
+
     fun toggleVoiceInput(enabled: Boolean) {
         _uiState.update { it.copy(voiceInputEnabled = enabled) }
         viewModelScope.launch { repository.saveVoiceInputEnabled(enabled) }
@@ -198,6 +220,33 @@ class SettingsViewModel(
     fun onCreativePresetTextChange(value: String) {
         _uiState.update { it.copy(creativePresetText = value) }
         viewModelScope.launch { repository.saveCreativePresetText(value) }
+    }
+
+    fun onCharacterCreativePresetTextChange(characterId: String, value: String) {
+        _uiState.update {
+            it.copy(characterCreativePresetTexts = it.characterCreativePresetTexts.toMutableMap().apply {
+                put(characterId, value)
+            })
+        }
+        viewModelScope.launch { repository.saveCharacterCreativePresetText(characterId, value) }
+    }
+
+    fun onCharacterIndependentCreativePresetEnabledChange(characterId: String, enabled: Boolean) {
+        _uiState.update {
+            it.copy(characterIndependentCreativePresetEnabled = it.characterIndependentCreativePresetEnabled.toMutableMap().apply {
+                put(characterId, enabled)
+            })
+        }
+        viewModelScope.launch { repository.saveCharacterIndependentCreativePresetEnabled(characterId, enabled) }
+    }
+
+    fun onCharacterIndependentCreativePresetAffectsPersonaChange(characterId: String, enabled: Boolean) {
+        _uiState.update {
+            it.copy(characterIndependentCreativePresetAffectsPersona = it.characterIndependentCreativePresetAffectsPersona.toMutableMap().apply {
+                put(characterId, enabled)
+            })
+        }
+        viewModelScope.launch { repository.saveCharacterIndependentCreativePresetAffectsPersona(characterId, enabled) }
     }
 
     fun onAutoThemeSuggestionEnabledChange(enabled: Boolean) {
@@ -252,6 +301,27 @@ class SettingsViewModel(
         saveVisionSettings()
     }
 
+    fun onSummaryBaseUrlChange(value: String) {
+        _uiState.update { it.copy(summaryBaseUrl = value) }
+        saveSummarySettings()
+    }
+
+    fun onSummaryApiKeyChange(value: String) {
+        _uiState.update { it.copy(summaryApiKey = value) }
+        saveSummarySettings()
+    }
+
+    fun onSummaryModelNameChange(value: String) {
+        _uiState.update { it.copy(summaryModelName = value) }
+        saveSummarySettings()
+    }
+
+    fun onAutoSummaryThresholdChange(value: String) {
+        val threshold = value.toIntOrNull() ?: return
+        _uiState.update { it.copy(autoSummaryThreshold = threshold.coerceIn(4, 500)) }
+        viewModelScope.launch { repository.saveAutoSummaryThreshold(threshold) }
+    }
+
     fun onSupportsImageChange(value: Boolean) {
         _uiState.update { it.copy(supportsImage = value) }
         viewModelScope.launch { repository.saveSupportsImage(value) }
@@ -266,6 +336,13 @@ class SettingsViewModel(
         val state = _uiState.value
         viewModelScope.launch {
             repository.saveVisionSettings(state.visionBaseUrl, state.visionApiKey, state.visionModelName)
+        }
+    }
+
+    private fun saveSummarySettings() {
+        val state = _uiState.value
+        viewModelScope.launch {
+            repository.saveSummarySettings(state.summaryBaseUrl, state.summaryApiKey, state.summaryModelName)
         }
     }
 
@@ -337,9 +414,8 @@ class SettingsViewModel(
                         providerModelsCache[provider.id] = models
                         _uiState.update {
                             it.copy(
-                                selectedModel = models.firstOrNull().orEmpty(),
                                 activeProviderModelCount = models.size,
-                                activeProviderModelPreview = models.take(3),
+                                activeProviderModelPreview = listOfNotNull(it.selectedModel.takeIf(String::isNotBlank)),
                                 activeProviderAvailableModels = models,
                                 providerModels = providerModelsCache.toMap(),
                                 modelMessage = if (models.isEmpty()) "未获取到模型" else "已获取 ${models.size} 个模型"

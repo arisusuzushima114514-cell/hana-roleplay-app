@@ -7,6 +7,7 @@ import com.hana.app.viewmodel.ChatViewModel
 import com.hana.app.viewmodel.ImageGenerationViewModel
 import com.hana.app.viewmodel.MemoryViewModel
 import com.hana.app.viewmodel.SettingsViewModel
+import com.hana.app.viewmodel.CustomizationViewModel
 
 internal class ChatViewModelFactory(
     private val appContainer: AppContainer
@@ -27,6 +28,16 @@ internal class ChatViewModelFactory(
                 attachmentService = appContainer.attachmentService,
                 memoryRepository = appContainer.memoryRepository
             ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class ${modelClass.name}")
+    }
+}
+
+internal class CustomizationViewModelFactory(private val appContainer: AppContainer) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(CustomizationViewModel::class.java)) {
+            return CustomizationViewModel(appContainer.customizationRepository) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class ${modelClass.name}")
     }

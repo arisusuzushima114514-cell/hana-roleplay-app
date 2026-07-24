@@ -84,31 +84,76 @@ class ConversationRepository(
     }
 
     suspend fun updateLastMessage(conversation: ConversationEntity, lastMessage: String?) {
-        dao.update(conversation.copy(lastMessage = lastMessage, updatedAt = System.currentTimeMillis()))
+        dao.updateLastMessage(conversation.id, lastMessage, System.currentTimeMillis())
     }
 
     suspend fun rename(conversation: ConversationEntity, title: String, isNamed: Boolean = conversation.isNamed) {
-        dao.update(conversation.copy(title = title, isNamed = isNamed, updatedAt = System.currentTimeMillis()))
+        dao.rename(conversation.id, title, isNamed, System.currentTimeMillis())
     }
 
     suspend fun updateParameters(
         conversation: ConversationEntity, modelName: String?, temperature: Float, topP: Float, maxTokens: Int, contextLimit: Int
     ) {
-        dao.update(conversation.copy(
+        dao.updateParameters(
+            id = conversation.id,
             modelName = modelName?.trim()?.takeIf { it.isNotBlank() },
-            temperature = temperature.coerceIn(0f, 2f), topP = topP.coerceIn(0f, 1f),
-            maxTokens = maxTokens.coerceAtLeast(1), contextLimit = contextLimit.coerceIn(1, 120),
+            temperature = temperature.coerceIn(0f, 2f),
+            topP = topP.coerceIn(0f, 1f),
+            maxTokens = maxTokens.coerceAtLeast(1),
+            contextLimit = contextLimit.coerceIn(1, 120),
             updatedAt = System.currentTimeMillis()
-        ))
+        )
     }
 
     suspend fun updateSystemPrompt(conversation: ConversationEntity, systemPrompt: String) {
-        dao.update(conversation.copy(systemPrompt = systemPrompt, updatedAt = System.currentTimeMillis()))
+        dao.updateSystemPrompt(conversation.id, systemPrompt, System.currentTimeMillis())
+    }
+
+    suspend fun updateHistorySummary(
+        conversationId: String,
+        historySummary: String?,
+        summaryUpToMessageId: Long?
+    ) {
+        dao.updateHistorySummary(
+            id = conversationId,
+            historySummary = historySummary?.trim()?.takeIf { it.isNotBlank() },
+            summaryUpToMessageId = summaryUpToMessageId,
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
+    suspend fun clearHistorySummary(conversationId: String) {
+        updateHistorySummary(conversationId, null, null)
+    }
+
+    suspend fun updateAuthorNote(conversationId: String, authorNote: String?) {
+        dao.updateAuthorNote(
+            conversationId,
+            authorNote?.trim()?.takeIf { it.isNotBlank() },
+            System.currentTimeMillis()
+        )
+    }
+
+    suspend fun updateWorldInfo(conversationId: String, worldInfo: String?) {
+        dao.updateWorldInfo(
+            conversationId,
+            worldInfo?.trim()?.takeIf { it.isNotBlank() },
+            System.currentTimeMillis()
+        )
+    }
+
+    suspend fun updateGroupScene(conversationId: String, scene: String?, locked: Boolean) {
+        dao.updateGroupScene(
+            conversationId,
+            scene?.trim()?.takeIf { it.isNotBlank() },
+            locked,
+            System.currentTimeMillis()
+        )
     }
 
     suspend fun addTokenUsage(conversation: ConversationEntity, tokens: Int) {
         if (tokens <= 0) return
-        dao.update(conversation.copy(totalTokens = conversation.totalTokens + tokens, updatedAt = System.currentTimeMillis()))
+        dao.addTokenUsage(conversation.id, tokens, System.currentTimeMillis())
     }
 
     suspend fun delete(conversationId: String) {
@@ -121,6 +166,26 @@ class ConversationRepository(
 
     suspend fun isCharacterUsed(characterId: String): Boolean {
         return dao.countByCharacterId(characterId) > 0
+    }
+
+    suspend fun removeCharacterFromGroups(characterId: String) {
+        val now = System.currentTimeMillis()
+        dao.getGroupConversations().forEach { conversation ->
+            val currentIds = conversation.participantCharacterIds
+                .orEmpty()
+                .split(',')
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+            if (characterId in currentIds) {
+                dao.updateParticipants(
+                    id = conversation.id,
+                    participantCharacterIds = currentIds.filterNot { it == characterId }
+                        .joinToString(",")
+                        .ifBlank { null },
+                    updatedAt = now
+                )
+            }
+        }
     }
 
     suspend fun togglePinned(conversationId: String) {

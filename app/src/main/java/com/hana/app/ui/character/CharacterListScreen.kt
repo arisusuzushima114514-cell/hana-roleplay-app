@@ -40,6 +40,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -55,6 +56,7 @@ import coil.request.ImageRequest
 import com.hana.app.R
 import com.hana.app.data.db.entity.CharacterCardEntity
 import com.hana.app.data.db.entity.ConversationEntity
+import com.hana.app.data.db.entity.isGroupConversation
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -72,6 +74,8 @@ fun CharacterListScreen(
     conversations: List<ConversationEntity>,
     creativePresetEnabledByCharacter: Map<String, Boolean> = emptyMap(),
     creativePresetAffectsPersonaByCharacter: Map<String, Boolean> = emptyMap(),
+    characterPresetEnabledByCharacter: Map<String, Boolean> = emptyMap(),
+    characterPresetAffectsPersonaByCharacter: Map<String, Boolean> = emptyMap(),
     onCreateCharacter: () -> Unit,
     onCreateStory: () -> Unit,
     onCreateGroupChat: (List<CharacterCardEntity>) -> Unit,
@@ -102,7 +106,7 @@ fun CharacterListScreen(
     }
     val filteredGroupConversations = remember(conversations, searchQuery) {
         val q = searchQuery.trim()
-        conversations.filter { it.conversationType == "group" }.filter {
+        conversations.filter { it.isGroupConversation() }.filter {
             q.isBlank() || it.title.contains(q, ignoreCase = true) || it.lastMessage.orEmpty().contains(q, ignoreCase = true)
         }
     }
@@ -118,50 +122,31 @@ fun CharacterListScreen(
             Surface(color = MaterialTheme.colorScheme.background) {
                 Column {
                 TopAppBar(
-                    title = { Text("角色宇宙", fontWeight = FontWeight.SemiBold) },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                    title = { Text("角色", fontWeight = FontWeight.SemiBold) },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
                 )
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                    shape = RoundedCornerShape(20.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f)
-                ) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)) {
-                                Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Icon(Icons.Filled.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                    Text("酒馆角色厅", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                                }
-                            }
-                            Spacer(Modifier.weight(1f))
-                            Text(filteredCharacters.size.toString(), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                        }
-                        Text("独立角色池", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                        Text("群聊、角色卡、故事都从这里分开进入。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     FilterChip(
+                        modifier = Modifier.weight(1f),
                         selected = currentSection == CharacterSection.Group,
                         onClick = { currentSection = CharacterSection.Group },
-                        label = { Text("群聊（测试）") },
+                        label = { Text("群聊") },
                         leadingIcon = if (currentSection == CharacterSection.Group) ({ Icon(Icons.Filled.Forum, null, Modifier.size(16.dp)) }) else null
                     )
                     FilterChip(
+                        modifier = Modifier.weight(1f),
                         selected = currentSection == CharacterSection.Character,
                         onClick = { currentSection = CharacterSection.Character },
                         label = { Text("角色卡") },
                         leadingIcon = if (currentSection == CharacterSection.Character) ({ Icon(Icons.Filled.ChatBubbleOutline, null, Modifier.size(16.dp)) }) else null
                     )
                     FilterChip(
+                        modifier = Modifier.weight(1f),
                         selected = currentSection == CharacterSection.Story,
                         onClick = { currentSection = CharacterSection.Story },
                         label = { Text("故事") },
@@ -202,7 +187,7 @@ fun CharacterListScreen(
                         focusedTrailingIconColor = MaterialTheme.colorScheme.primary,
                         unfocusedTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant
                     ),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).height(50.dp)
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).heightIn(min = 48.dp)
                 )
             }
             }
@@ -362,6 +347,8 @@ fun CharacterListScreen(
                                 character = character,
                                 creativePresetEnabled = creativePresetEnabledByCharacter[character.id] == true,
                                 creativePresetAffectsPersona = creativePresetAffectsPersonaByCharacter[character.id] == true,
+                                characterPresetEnabled = characterPresetEnabledByCharacter[character.id] == true,
+                                characterPresetAffectsPersona = characterPresetAffectsPersonaByCharacter[character.id] == true,
                                 onClick = { onSelectCharacter(character) },
                                 onEdit = { onEditCharacter(character) },
                                 onDelete = { onDeleteCharacter(character) },
@@ -476,7 +463,7 @@ private fun ConversationSectionList(
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
             val participantCharacters = participantIds.mapNotNull { id -> characters.firstOrNull { it.id == id } }
-            val isGroup = conversation.conversationType == "group"
+            val isGroup = conversation.isGroupConversation()
             val isStory = conversation.title.startsWith("故事：")
             val timeText = remember(conversation.updatedAt) { formatTimeAgo(conversation.updatedAt) }
             Surface(
@@ -551,7 +538,7 @@ private fun ConversationSectionList(
                     if (isGroup) {
                         Text(
                             buildString {
-                                append("${participantCharacters.size} 位角色")
+                                append(if (participantCharacters.isEmpty()) "群聊暂无角色，历史记录已保留" else "${participantCharacters.size} 位角色")
                                 if (participantCharacters.isNotEmpty()) {
                                     append(" · ")
                                     append(participantCharacters.joinToString("、") { it.name }.take(36))
@@ -633,6 +620,8 @@ private fun CharacterListItem(
     character: CharacterCardEntity,
     creativePresetEnabled: Boolean,
     creativePresetAffectsPersona: Boolean,
+    characterPresetEnabled: Boolean,
+    characterPresetAffectsPersona: Boolean,
     onClick: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -644,11 +633,6 @@ private fun CharacterListItem(
     val timeText = remember(character.lastMessageAt, character.updatedAt) {
         val ts = if (character.lastMessageAt > 0L) character.lastMessageAt else character.updatedAt
         formatTimeAgo(ts)
-    }
-    val creativePresetLabel = when {
-        !creativePresetEnabled -> null
-        creativePresetAffectsPersona -> "影响人格"
-        else -> "模型补充"
     }
 
     Surface(
@@ -694,6 +678,24 @@ private fun CharacterListItem(
                 }
             }
 
+            if (creativePresetEnabled || characterPresetEnabled) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (creativePresetEnabled) {
+                        CharacterPresetBadge(
+                            label = if (creativePresetAffectsPersona) "破甲·人格" else "破甲",
+                            emphasized = creativePresetAffectsPersona
+                        )
+                    }
+                    if (characterPresetEnabled) {
+                        CharacterPresetBadge(
+                            label = if (characterPresetAffectsPersona) "角色·人格" else "角色预设",
+                            emphasized = characterPresetAffectsPersona
+                        )
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
@@ -709,35 +711,6 @@ private fun CharacterListItem(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
-                    if (creativePresetLabel != null) {
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = if (creativePresetAffectsPersona) {
-                                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
-                            } else {
-                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-                            }
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    Icons.Filled.AutoAwesome,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(12.dp),
-                                    tint = if (creativePresetAffectsPersona) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary
-                                )
-                                Text(
-                                    text = creativePresetLabel,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (creativePresetAffectsPersona) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                    }
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -809,6 +782,27 @@ private fun CharacterListItem(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CharacterPresetBadge(label: String, emphasized: Boolean) {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = if (emphasized) {
+            MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.72f)
+        } else {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.62f)
+        }
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = if (emphasized) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1
+        )
     }
 }
 

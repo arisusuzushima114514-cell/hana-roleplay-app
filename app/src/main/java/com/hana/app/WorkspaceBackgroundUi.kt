@@ -233,13 +233,13 @@ internal fun BackgroundLibrarySheet(
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 if (bg.filePath == currentGlobalPath) {
-                                    AssistChip(onClick = {}, label = { Text("当前全局") })
+                                    AssistChip(onClick = {}, enabled = false, label = { Text("当前全局") })
                                 }
                                 if (bg.filePath == currentMainPath) {
-                                    AssistChip(onClick = {}, label = { Text("当前主聊") })
+                                    AssistChip(onClick = {}, enabled = false, label = { Text("当前主聊") })
                                 }
                                 if (currentCharacterPath != null && bg.filePath == currentCharacterPath) {
-                                    AssistChip(onClick = {}, label = { Text("当前角色") })
+                                    AssistChip(onClick = {}, enabled = false, label = { Text("当前角色") })
                                 }
                             }
                             FlowRow(

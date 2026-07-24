@@ -19,11 +19,17 @@ interface MemoryEntryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: MemoryEntryEntity)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfAbsent(entity: MemoryEntryEntity): Long
+
     @Update
     suspend fun update(entity: MemoryEntryEntity)
 
     @Query("SELECT * FROM memory_entries WHERE scope = :scope AND content = :content LIMIT 1")
     suspend fun findByScopeAndContent(scope: String, content: String): MemoryEntryEntity?
+
+    @Query("SELECT * FROM memory_entries WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): MemoryEntryEntity?
 
     @Query("UPDATE memory_entries SET isPinned = :isPinned, updatedAt = :updatedAt WHERE id = :id")
     suspend fun setPinned(id: String, isPinned: Boolean, updatedAt: Long)

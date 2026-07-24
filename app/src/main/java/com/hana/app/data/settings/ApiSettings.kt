@@ -9,3 +9,4 @@ data class ApiSettings(
 
 const val DEFAULT_API_BASE_URL = "https://api.deepseek.com/v1"
 const val DEFAULT_MODEL_NAME = "deepseek-chat"
+const val DEFAULT_AUTO_SUMMARY_THRESHOLD = 24

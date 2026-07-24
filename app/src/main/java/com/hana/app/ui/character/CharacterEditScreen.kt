@@ -64,9 +64,12 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hana.app.R
 import com.hana.app.data.db.entity.CharacterCardEntity
+import com.hana.app.data.db.entity.CHARACTER_MODE_SINGLE
+import com.hana.app.data.db.entity.EMPTY_SUB_CHARACTERS_JSON
 import java.util.UUID
 
 private val presetTags = listOf("治愈", "二次元", "学习", "编程", "语言", "娱乐", "日常", "倾诉", "冒险", "奇幻")
@@ -133,7 +136,9 @@ fun CharacterEditScreen(
             createdAt = initialCharacter?.createdAt ?: now,
             updatedAt = now,
             lastMessageAt = initialCharacter?.lastMessageAt ?: 0L,
-            lastMessagePreview = initialCharacter?.lastMessagePreview.orEmpty()
+            lastMessagePreview = initialCharacter?.lastMessagePreview.orEmpty(),
+            characterMode = initialCharacter?.characterMode ?: CHARACTER_MODE_SINGLE,
+            subCharactersJson = initialCharacter?.subCharactersJson ?: EMPTY_SUB_CHARACTERS_JSON
         )
     }
 
@@ -277,11 +282,15 @@ fun CharacterEditScreen(
                         label = { Text("角色描述/人设") },
                         placeholder = { Text(stringResource(R.string.character_desc_hint)) },
                         minLines = 4,
+                        maxLines = 20,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             unfocusedBorderColor = MaterialTheme.colorScheme.surfaceVariant
-                        )
+                        ),
+                        supportingText = {
+                            Text("${description.length} 字", style = MaterialTheme.typography.labelSmall)
+                        }
                     )
                 }
             }
@@ -593,6 +602,7 @@ fun CharacterEditScreen(
             }
         )
     }
+
 }
 
 private data class ImportResult(
@@ -648,6 +658,7 @@ private fun parseCharacterImport(text: String): ImportResult {
                     "greeting" -> greetingLines.add(line)
                     "description" -> descLines.add(line)
                     "persona" -> personaLines.add(line)
+                    else -> descLines.add(line)  // 未识别到标题时，默认归入描述
                 }
             }
         }
@@ -655,7 +666,7 @@ private fun parseCharacterImport(text: String): ImportResult {
 
     return ImportResult(
         name = name,
-        description = descLines.joinToString("\n").ifBlank { text.take(500) },
+        description = descLines.joinToString("\n").ifBlank { text },
         greeting = greetingLines.joinToString("\n"),
         userPersona = personaLines.joinToString("\n"),
         tags = tags

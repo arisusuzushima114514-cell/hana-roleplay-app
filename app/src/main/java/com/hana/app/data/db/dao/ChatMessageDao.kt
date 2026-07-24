@@ -42,6 +42,15 @@ interface ChatMessageDao {
     )
     suspend fun deleteFromMessage(conversationId: String, id: Long)
 
+    @Query(
+        """
+        DELETE FROM chat_messages
+        WHERE conversationId = :conversationId
+        AND id > :id
+        """
+    )
+    suspend fun deleteAfterMessage(conversationId: String, id: Long)
+
     @Query("DELETE FROM chat_messages WHERE conversationId = :conversationId")
     suspend fun deleteByConversation(conversationId: String)
 
@@ -62,6 +71,12 @@ interface ChatMessageDao {
 
     @Query("SELECT * FROM chat_messages WHERE id = :id LIMIT 1")
     suspend fun getById(id: Long): ChatMessageEntity?
+
+    @Query("SELECT COUNT(*) FROM chat_messages WHERE conversationId = :conversationId AND role = :role")
+    suspend fun countByRole(conversationId: String, role: String): Int
+
+    @Query("SELECT * FROM chat_messages WHERE conversationId = :conversationId ORDER BY timestamp DESC, id DESC LIMIT 1")
+    suspend fun getLastByConversation(conversationId: String): ChatMessageEntity?
 
     @Query(
         """

@@ -1,5 +1,19 @@
-val appVersionName = findProperty("APP_VERSION_NAME")?.toString() ?: "1.7.4"
-val appVersionCode = findProperty("APP_VERSION_CODE")?.toString()?.toIntOrNull() ?: 11
+val appVersionName = findProperty("APP_VERSION_NAME")?.toString() ?: "1.8.0"
+val appVersionCode = findProperty("APP_VERSION_CODE")?.toString()?.toIntOrNull() ?: 30
+val releaseStoreFile = providers.gradleProperty("RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.gradleProperty("RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.gradleProperty("RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.gradleProperty("RELEASE_KEY_PASSWORD").orNull
+val hasReleaseSigning = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
+val allowReleaseCleartext = providers.gradleProperty("ALLOW_RELEASE_CLEARTEXT")
+    .orNull
+    ?.toBooleanStrictOrNull()
+    ?: false
 
 plugins {
     id("com.android.application")
@@ -8,6 +22,12 @@ plugins {
 }
 
 android {
+
+    kapt {
+        arguments {
+            arg("room.schemaLocation", "$projectDir/schemas")
+        }
+    }
 
     buildFeatures {
         buildConfig = true
@@ -29,11 +49,13 @@ android {
     }
 
     signingConfigs {
-        getByName("debug") {
-            storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(requireNotNull(releaseStoreFile))
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
         }
     }
 
@@ -41,12 +63,22 @@ android {
         debug {
             isDebuggable = true
             isMinifyEnabled = false
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isDebuggable = false
             isMinifyEnabled = false
             isShrinkResources = false
+            manifestPlaceholders["usesCleartextTraffic"] = allowReleaseCleartext.toString()
+        }
+    }
+
+    bundle {
+        language {
+            enableSplit = false
         }
     }
 
@@ -68,19 +100,16 @@ android {
     }
 
     lint {
-        checkReleaseBuilds = false
-        abortOnError = false
+        checkReleaseBuilds = true
     }
 }
 
 val copyDebugApkToRoot by tasks.registering {
     doNotTrackState("Root workspace contains tool-managed files and locks")
     doLast {
-        copy {
-            from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
-            into(rootDir)
-            rename { "AIChat-phone-install.apk" }
-        }
+        val sourceApk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk").get().asFile
+        check(sourceApk.isFile) { "Debug APK was not generated: ${sourceApk.absolutePath}" }
+        sourceApk.copyTo(rootDir.resolve("AIChat-phone-install.apk"), overwrite = true)
     }
 }
 
@@ -116,4 +145,6 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("io.coil-kt:coil-compose:2.6.0")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

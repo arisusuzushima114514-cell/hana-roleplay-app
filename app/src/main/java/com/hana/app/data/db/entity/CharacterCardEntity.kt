@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "character_cards")
+@androidx.compose.runtime.Stable
 data class CharacterCardEntity(
     @PrimaryKey val id: String,
     val name: String,
@@ -17,5 +18,7 @@ data class CharacterCardEntity(
     val createdAt: Long,
     val updatedAt: Long,
     val lastMessageAt: Long = 0L,
-    val lastMessagePreview: String = ""
+    val lastMessagePreview: String = "",
+    val characterMode: String = CHARACTER_MODE_SINGLE,
+    val subCharactersJson: String = EMPTY_SUB_CHARACTERS_JSON
 )

@@ -35,6 +35,13 @@ class MessageRepository(
         )
     }
 
+    suspend fun deleteAfter(message: ChatMessageEntity) {
+        dao.deleteAfterMessage(
+            conversationId = message.conversationId,
+            id = message.id
+        )
+    }
+
     suspend fun deleteByConversation(conversationId: String) {
         dao.deleteByConversation(conversationId)
     }
@@ -52,4 +59,8 @@ class MessageRepository(
     }
 
     suspend fun getById(messageId: Long): ChatMessageEntity? = dao.getById(messageId)
+
+    suspend fun countByRole(conversationId: String, role: String): Int = dao.countByRole(conversationId, role)
+
+    suspend fun getLastMessage(conversationId: String): ChatMessageEntity? = dao.getLastByConversation(conversationId)
 }

@@ -6,10 +6,14 @@ import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
-import android.provider.MediaStore
+import android.graphics.Bitmap.CompressFormat
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -35,6 +39,25 @@ class BackgroundManager(
     private val backgroundDir = File(context.filesDir, "backgrounds").apply { mkdirs() }
     private val libraryDir = File(backgroundDir, "library").apply { mkdirs() }
 
+    // 内存缓存：避免每次 loadBackground 都重新解码文件
+    private val cacheMutex = Mutex()
+    private val bitmapCache = mutableMapOf<String, Bitmap>()
+
+    private fun cacheKeyFor(target: BackgroundTarget): String = when (target) {
+        BackgroundTarget.Global -> "global"
+        BackgroundTarget.MainChat -> "main_chat"
+        is BackgroundTarget.Character -> "character_${target.characterId}"
+    }
+
+    /** 失效某个目标的缓存，保存/删除背景后调用 */
+    fun invalidateCache(target: BackgroundTarget) {
+        if (target == BackgroundTarget.Global) {
+            bitmapCache.clear()
+        } else {
+            bitmapCache.remove(cacheKeyFor(target))
+        }
+    }
+
     suspend fun saveBackground(uri: Uri, target: BackgroundTarget): Boolean = withContext(Dispatchers.IO) {
         runCatching {
             val bitmap = decodeBitmapScaled(uri) ?: return@runCatching false
@@ -45,12 +68,16 @@ class BackgroundManager(
             FileOutputStream(newLibraryFile()).use { output ->
                 resized.compress(Bitmap.CompressFormat.JPEG, 80, output)
             }
+            invalidateCache(target)
             true
         }.getOrDefault(false)
     }
 
     suspend fun loadBackground(target: BackgroundTarget): Bitmap? = withContext(Dispatchers.IO) {
-        when (target) {
+        val key = cacheKeyFor(target)
+        // 先查缓存
+        cacheMutex.withLock { bitmapCache[key] }?.let { return@withContext it }
+        val bitmap = when (target) {
             is BackgroundTarget.Character -> {
                 decodeFromFile(fileFor(target)) ?: decodeFromFile(fileFor(BackgroundTarget.Global))
             }
@@ -59,6 +86,11 @@ class BackgroundManager(
             }
             BackgroundTarget.Global -> decodeFromFile(fileFor(target))
         }
+        // 写入缓存
+        if (bitmap != null) {
+            cacheMutex.withLock { bitmapCache[key] = bitmap }
+        }
+        bitmap
     }
 
     fun isCustomBackgroundEnabled(target: BackgroundTarget): Boolean = fileFor(target).exists()
@@ -69,6 +101,7 @@ class BackgroundManager(
 
     fun clearBackground(target: BackgroundTarget) {
         fileFor(target).takeIf { it.exists() }?.delete()
+        invalidateCache(target)
     }
 
     fun clearAllBackgrounds() {
@@ -76,6 +109,7 @@ class BackgroundManager(
             if (file.isFile) file.delete()
         }
         libraryDir.listFiles()?.forEach { file -> if (file.isFile) file.delete() }
+        bitmapCache.clear()
     }
 
     fun listSavedBackgrounds(): List<SavedBackgroundInfo> {
@@ -100,6 +134,7 @@ class BackgroundManager(
             source.inputStream().use { input ->
                 FileOutputStream(fileFor(target)).use { output -> input.copyTo(output) }
             }
+            invalidateCache(target)
             true
         }.getOrDefault(false)
     }
@@ -189,7 +224,19 @@ class BackgroundManager(
     private fun hasSameContent(first: File, second: File): Boolean {
         if (!first.exists() || !second.exists() || first.length() != second.length()) return false
         return try {
-            first.readBytes().contentEquals(second.readBytes())
+            val buf1 = ByteArray(8192)
+            val buf2 = ByteArray(8192)
+            BufferedInputStream(FileInputStream(first)).use { s1 ->
+                BufferedInputStream(FileInputStream(second)).use { s2 ->
+                    var read1: Int
+                    var read2: Int
+                    while (s1.read(buf1).also { read1 = it } > 0) {
+                        read2 = s2.read(buf2, 0, read1.coerceAtMost(buf2.size))
+                        if (read1 != read2 || !buf1.copyOf(read1).contentEquals(buf2.copyOf(read2))) return false
+                    }
+                    true
+                }
+            }
         } catch (_: Exception) {
             false
         }

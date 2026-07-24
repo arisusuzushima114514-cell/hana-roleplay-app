@@ -8,6 +8,7 @@ import androidx.room.PrimaryKey
     tableName = "memory_entries",
     indices = [Index("scope"), Index("updatedAt")]
 )
+@androidx.compose.runtime.Stable
 data class MemoryEntryEntity(
     @PrimaryKey val id: String,
     val scope: String,

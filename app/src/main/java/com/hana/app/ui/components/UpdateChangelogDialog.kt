@@ -1,15 +1,10 @@
 package com.hana.app.ui.components
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -21,37 +16,37 @@ import androidx.compose.ui.window.DialogProperties
 /**
  * 版本更新推送弹窗。
  * 每次更新后首次打开 App 自动弹出，显示本次更新内容。
- * 用户可关闭或勾选"不再显示"。
+ * 用户确认后记录当前公告版本，不再重复显示。
  *
  * @param versionName 当前版本号，如 "1.7.4"
  * @param changelog 更新内容（Markdown 格式文本）
  * @param onDismiss 关闭回调
- * @param onDontShowAgain 用户勾选"不再显示"时的回调
+ * @param onAcknowledge 用户确认已阅读时的回调
  */
 @Composable
 fun UpdateChangelogDialog(
     versionName: String,
     changelog: String,
     onDismiss: () -> Unit,
-    onDontShowAgain: (Boolean) -> Unit
+    onAcknowledge: () -> Unit
 ) {
-    var dontShowAgain by remember { mutableStateOf(false) }
-
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.92f)
-                .fillMaxHeight(0.75f),
+                .fillMaxWidth(0.94f)
+                .widthIn(max = 560.dp)
+                .fillMaxHeight(0.88f)
+                .heightIn(max = 720.dp),
             shape = MaterialTheme.shapes.extraLarge,
             tonalElevation = 8.dp
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(24.dp)
+                    .padding(horizontal = 20.dp, vertical = 18.dp)
             ) {
                 // 标题
                 Text(
@@ -127,39 +122,14 @@ fun UpdateChangelogDialog(
                 HorizontalDivider()
                 Spacer(Modifier.height(12.dp))
 
-                // 底部按钮行
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Button(
+                    onClick = {
+                        onAcknowledge()
+                        onDismiss()
+                    },
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    // "不再显示" 复选框
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { dontShowAgain = !dontShowAgain }
-                    ) {
-                        Checkbox(
-                            checked = dontShowAgain,
-                            onCheckedChange = { checked -> dontShowAgain = checked }
-                        )
-                        Text(
-                            text = "不再显示",
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    // 关闭按钮
-                    Button(
-                        onClick = {
-                            onDontShowAgain(dontShowAgain)
-                            onDismiss()
-                        }
-                    ) {
-                        Text("知道了")
-                    }
+                    Text("知道了")
                 }
             }
         }

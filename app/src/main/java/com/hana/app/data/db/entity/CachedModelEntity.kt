@@ -8,6 +8,7 @@ import androidx.room.PrimaryKey
     tableName = "cached_models",
     indices = [Index("baseUrl")]
 )
+@androidx.compose.runtime.Stable
 data class CachedModelEntity(
     @PrimaryKey val id: String,
     val name: String,
@@ -18,6 +19,7 @@ data class CachedModelEntity(
     val cachedAt: Long = System.currentTimeMillis()
 )
 
+@androidx.compose.runtime.Stable
 data class ModelInfo(
     val id: String,
     val name: String,

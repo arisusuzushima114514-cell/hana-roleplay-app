@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hana.app.data.db.entity.ChatMessageEntity
 import com.hana.app.data.db.entity.ConversationEntity
+import com.hana.app.data.db.entity.isMainChatConversation
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -77,8 +78,15 @@ fun ConversationDrawer(
 
     val filtered = remember(conversations, query) {
         val kw = query.trim()
-        if (kw.isBlank()) conversations.filter { it.characterId == null }
-        else conversations.filter { it.characterId == null && (it.title.contains(kw, true) || it.lastMessage.orEmpty().contains(kw, true)) }
+        val mainConversations = conversations.filter { it.isMainChatConversation() }
+        if (kw.isBlank()) mainConversations
+        else mainConversations.filter { it.title.contains(kw, true) || it.lastMessage.orEmpty().contains(kw, true) }
+    }
+    val mainConversationIds = remember(conversations) {
+        conversations.filter { it.isMainChatConversation() }.mapTo(mutableSetOf()) { it.id }
+    }
+    val mainFavorites = remember(favorites, mainConversationIds) {
+        favorites.filter { it.conversationId in mainConversationIds }
     }
 
     val todayStart = remember { resetTime(0) }
@@ -141,11 +149,11 @@ fun ConversationDrawer(
                     TextButton(onClick = { showFavorites = false }) { Text("返回") }
                 }
                 Spacer(Modifier.height(8.dp))
-                if (favorites.isEmpty()) {
+                if (mainFavorites.isEmpty()) {
                     Text("暂无收藏", color = Color.Gray)
                 } else {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        items(favorites) { msg ->
+                        items(mainFavorites) { msg ->
                             FavoriteItem(msg, conversations, onClick = { onSelectConversation(msg.conversationId); showFavorites = false })
                         }
                     }
@@ -169,7 +177,7 @@ fun ConversationDrawer(
                 verticalArrangement = Arrangement.spacedBy(1.dp),
                 modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
             ) {
-                if (favorites.isNotEmpty()) {
+                if (mainFavorites.isNotEmpty()) {
                     item {
                         Card(
                             onClick = { showFavorites = true },
@@ -179,7 +187,7 @@ fun ConversationDrawer(
                             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Filled.Star, null, tint = Color(0xFFFFC107))
                                 Spacer(Modifier.padding(start = 8.dp))
-                                Text("收藏夹 (${favorites.size})", fontWeight = FontWeight.Medium)
+                                Text("收藏夹 (${mainFavorites.size})", fontWeight = FontWeight.Medium)
                             }
                         }
                     }
@@ -195,7 +203,7 @@ fun ConversationDrawer(
                             query = query,
                             onSelect = { onSelectConversation(conversation.id) },
                             onLongPress = { menuConversation = conversation; renameValue = conversation.title },
-                            onDelete = { onDeleteConversation(conversation.id) },
+                            onDelete = { deletingConversation = conversation },
                             onTogglePinned = { onTogglePinned(conversation.id) },
                             onToggleFav = { onToggleFav(conversation.id) }
                         )

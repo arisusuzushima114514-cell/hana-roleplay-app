@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -162,21 +163,21 @@ fun ModelPickerSheet(
                                 detectNativeWebSearchSupport(modelName = model.name, providerName = model.provider, baseUrl = model.baseUrl)
                             }
                             Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = if (isCurrent) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isCurrent) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f) else Color.Transparent,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .combinedClickable(
                                         onClick = { onSelectModel(model) },
                                         onLongClick = {
                                             clipboardManager.setText(AnnotatedString(model.name))
-                                            onSelectModel(model)
                                         }
                                     )
                             ) {
                                 Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Text(if (isCurrent) "●" else "○", fontSize = 12.sp, color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Spacer(Modifier.width(8.dp))
+                                    if (isCurrent) Icon(Icons.Filled.Check, contentDescription = "当前模型", modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                                    else Spacer(Modifier.size(18.dp))
+                                    Spacer(Modifier.width(10.dp))
                                     Column(Modifier.weight(1f)) {
                                         Text(model.name, style = MaterialTheme.typography.bodyMedium, fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -208,8 +209,8 @@ fun ModelPickerSheet(
                                         }
                                     }
                                     Spacer(Modifier.width(4.dp))
-                                    IconButton(onClick = { onToggleFavorite(model.id) }, modifier = Modifier.size(28.dp)) {
-                                        Icon(Icons.Filled.Star, null, Modifier.size(16.dp), tint = if (model.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f))
+                                    IconButton(onClick = { onToggleFavorite(model.id) }, modifier = Modifier.size(48.dp)) {
+                                        Icon(Icons.Filled.Star, if (model.isFavorite) "取消收藏" else "收藏模型", Modifier.size(19.dp), tint = if (model.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
                                     }
                                 }
                             }

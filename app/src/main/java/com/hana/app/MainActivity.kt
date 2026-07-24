@@ -1,6 +1,9 @@
 package com.hana.app
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Build
 import android.util.Log
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -9,6 +12,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -16,18 +20,34 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.SettingsSuggest
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -44,13 +64,23 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+import androidx.compose.ui.layout.ContentScale
+import java.io.File
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hana.app.BuildConfig
 import com.hana.app.core.AppContainer
 import com.hana.app.data.settings.SettingsRepository
+import com.hana.app.data.db.entity.isMainChatConversation
 import com.hana.app.manager.BackgroundTarget
 import com.hana.app.manager.LanguageManager
 import com.hana.app.manager.SavedBackgroundInfo
@@ -68,7 +98,9 @@ import com.hana.app.viewmodel.ChatViewModel
 import com.hana.app.viewmodel.ImageGenerationViewModel
 import com.hana.app.viewmodel.MemoryViewModel
 import com.hana.app.viewmodel.SettingsViewModel
+import com.hana.app.viewmodel.CustomizationViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.util.Calendar
@@ -92,14 +124,24 @@ private data class AutoThemeSuggestion(
 class MainActivity : AppCompatActivity() {
     private val appContainer by lazy { AppContainer(applicationContext) }
 
+    override fun attachBaseContext(newBase: android.content.Context) {
+        val localizedContext = try {
+            val language = runBlocking { SettingsRepository(newBase).settingsFlow.first().language }
+            LanguageManager.applyLocaleConfig(newBase, language)
+        } catch (_: Exception) {
+            newBase
+        }
+        super.attachBaseContext(localizedContext)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         try {
-            val initialThemeMode = runBlocking {
-                SettingsRepository(applicationContext).getSettings().themeMode
+            val initialSettings = runBlocking {
+                SettingsRepository(applicationContext).settingsFlow.first()
             }
-            applyThemeMode(initialThemeMode)
+            applyThemeMode(initialSettings.themeMode)
         } catch (_: Exception) {
             applyThemeMode(com.hana.app.ui.theme.ThemeMode.SYSTEM)
         }
@@ -127,6 +169,7 @@ private fun WorkspaceApp(appContainer: AppContainer) {
     val settingsViewModel: SettingsViewModel = viewModel(
         factory = SettingsViewModelFactory(appContainer)
     )
+    val customizationViewModel: CustomizationViewModel = viewModel(factory = CustomizationViewModelFactory(appContainer))
     val imageGenerationViewModel: ImageGenerationViewModel = viewModel(
         factory = ImageGenerationViewModelFactory(appContainer)
     )
@@ -135,13 +178,16 @@ private fun WorkspaceApp(appContainer: AppContainer) {
     )
 
     val uiState by chatViewModel.uiState.collectAsState()
+    val promptPreviewState by chatViewModel.promptPreviewState.collectAsState()
     val settingsState by settingsViewModel.uiState.collectAsState()
+    val customizationState by customizationViewModel.uiState.collectAsState()
     val imageState by imageGenerationViewModel.uiState.collectAsState()
     val memoryState by memoryViewModel.uiState.collectAsState()
     val language by settingsViewModel.language.collectAsState(initial = settingsState.language)
     val keyboardController = LocalSoftwareKeyboardController.current
     val appSnackbarHostState = remember { SnackbarHostState() }
     val appScope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
     var imageModeEnabled by rememberSaveable { mutableStateOf(false) }
     var autoThemeSuggestion by rememberSaveable { mutableStateOf<AutoThemeSuggestion?>(null) }
     var disableAutoThemeSuggestion by rememberSaveable { mutableStateOf(false) }
@@ -168,6 +214,14 @@ private fun WorkspaceApp(appContainer: AppContainer) {
         chatViewModel.ensureModelCacheLoaded()
     }
 
+    LaunchedEffect(customizationState.generationCompleteHapticEnabled) {
+        chatViewModel.generationCompleted.collect {
+            if (customizationState.generationCompleteHapticEnabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            }
+        }
+    }
+
     LaunchedEffect(currentTimeBucket, settingsState.themeMode, settingsState.autoThemeSuggestionEnabled) {
         val suggestion = currentTimeBucket ?: return@LaunchedEffect
         if (!settingsState.autoThemeSuggestionEnabled || autoThemeSuggestion != null) {
@@ -188,12 +242,33 @@ private fun WorkspaceApp(appContainer: AppContainer) {
         settingsViewModel.markAutoThemeSuggestionShown(suggestion.tag)
     }
 
-    HanaTheme(themeMode = settingsState.themeMode) {
+    HanaTheme(
+        themeMode = settingsState.themeMode,
+        palette = settingsState.themePalette,
+        aiBubbleImagePath = customizationState.aiBubbleImagePath,
+        userBubbleImagePath = customizationState.userBubbleImagePath,
+        aiBubbleFixedEdgePercent = customizationState.aiBubbleFixedEdgePercent,
+        userBubbleFixedEdgePercent = customizationState.userBubbleFixedEdgePercent,
+        chatFontSize = customizationState.chatFontSize,
+        chatDensity = customizationState.chatDensity,
+        bubbleWidthPercent = customizationState.bubbleWidthPercent,
+        showMessageAvatars = customizationState.showMessageAvatars,
+        showMessageTime = customizationState.showMessageTime,
+        inputBarSize = customizationState.inputBarSize,
+        inputBarWidthPercent = customizationState.inputBarWidthPercent
+    ) {
+        val bottomIcons = Triple(Icons.AutoMirrored.Filled.Chat, Icons.Filled.Person, Icons.Filled.Settings)
+        @Composable fun BottomIcon(path: String, fallback: androidx.compose.ui.graphics.vector.ImageVector) {
+            val file = path.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.isFile }
+            if (file != null) AsyncImage(model = file, contentDescription = null, modifier = Modifier.size(25.dp).clip(RoundedCornerShape(7.dp)), contentScale = ContentScale.Crop)
+            else Icon(fallback, contentDescription = null, modifier = Modifier.size(22.dp))
+        }
         var currentTab by rememberSaveable { mutableStateOf(MainTab.Chat) }
         var editingCharacterId by rememberSaveable { mutableStateOf<String?>(null) }
         var creatingCharacter by rememberSaveable { mutableStateOf(false) }
         var creatingStory by rememberSaveable { mutableStateOf(false) }
         var selectedCharacterIdForChat by rememberSaveable { mutableStateOf<String?>(null) }
+        var selectedUniverseConversationId by rememberSaveable { mutableStateOf<String?>(null) }
         var pendingBackgroundTarget by rememberSaveable { mutableStateOf("global") }
         var backgroundChoices by remember { mutableStateOf<List<BackgroundChoice>>(emptyList()) }
         var backgroundSourceChoices by remember { mutableStateOf<List<PendingBackgroundSelection>>(emptyList()) }
@@ -245,6 +320,10 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 }
                 selectedCharacterIdForChat != null -> {
                     selectedCharacterIdForChat = null
+                    chatViewModel.returnToMainConversation()
+                }
+                selectedUniverseConversationId != null -> {
+                    selectedUniverseConversationId = null
                     chatViewModel.returnToMainConversation()
                 }
                 currentTab == MainTab.Character && creatingStory -> {
@@ -320,7 +399,21 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 }
             }
         }
-        var pendingCharacterExportId by remember { mutableStateOf<String?>(null) }
+        var pendingAttachmentImageToSave by rememberSaveable { mutableStateOf<String?>(null) }
+        val galleryPermissionLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            val pending = pendingAttachmentImageToSave
+            pendingAttachmentImageToSave = null
+            if (granted && pending != null) {
+                chatViewModel.saveAttachmentImage(pending) { msg ->
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
+            } else if (!granted) {
+                Toast.makeText(context, "Android 9 及以下保存图片需要存储权限", Toast.LENGTH_SHORT).show()
+            }
+        }
+        var pendingCharacterExportId by rememberSaveable { mutableStateOf<String?>(null) }
         val characterExportJsonLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.CreateDocument("application/json")
         ) { uri ->
@@ -332,7 +425,7 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 }
             }
         }
-        var pendingCharacterPngExportId by remember { mutableStateOf<String?>(null) }
+        var pendingCharacterPngExportId by rememberSaveable { mutableStateOf<String?>(null) }
         val characterExportPngLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.CreateDocument("image/png")
         ) { uri ->
@@ -387,7 +480,62 @@ private fun WorkspaceApp(appContainer: AppContainer) {
             isGeneratingScene = false
         }
 
-        if (selectedCharacterForChat != null) {
+        if (selectedUniverseConversationId != null) {
+            ChatScreenWithDrawer(
+                uiState = uiState,
+                onInputChange = chatViewModel::onInputChange,
+                onSend = { chatViewModel.sendMessage() },
+                onSendText = { chatViewModel.sendMessage(it) },
+                onSelectConversation = chatViewModel::selectConversation,
+                onNewConversation = { chatViewModel.createNormalConversation() },
+                onRenameConversation = chatViewModel::renameConversation,
+                onDeleteConversation = chatViewModel::deleteConversation,
+                onExportConversation = { conversationId, asMarkdown ->
+                    chatViewModel.exportConversation(context, conversationId, asMarkdown) { success, message ->
+                        Toast.makeText(context, if (success) "已导出: $message" else "导出失败: $message", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                onDeleteMessage = chatViewModel::deleteMessage,
+                onRegenerateMessage = chatViewModel::regenerateAssistantMessage,
+                onEditMessage = chatViewModel::editUserMessage,
+                onEditMessageToInput = chatViewModel::editMessageToInput,
+                onRetryFromMessage = chatViewModel::retryFromUserMessage,
+                onPersistImageAttachment = chatViewModel::persistImageAttachment,
+                onPersistFileAttachment = chatViewModel::persistFileAttachment,
+                onPersistCameraAttachment = chatViewModel::persistCameraAttachment,
+                onSaveAttachmentImage = { uriString -> chatViewModel.saveAttachmentImage(uriString) },
+                onStopGeneration = chatViewModel::stopGeneration,
+                onRetryLastUserMessage = chatViewModel::retryLastUserMessage,
+                onUpdateConversationParameters = chatViewModel::updateConversationParameters,
+                onUpdateSystemPrompt = chatViewModel::updateSystemPrompt,
+                onToggleWebSearch = chatViewModel::toggleWebSearch,
+                onToggleFavorite = chatViewModel::toggleFavorite,
+                onTogglePinned = chatViewModel::toggleConversationPinned,
+                onToggleConvFav = chatViewModel::toggleConversationFavorite,
+                onSelectModel = chatViewModel::switchModelAndApply,
+                onToggleModelFavorite = chatViewModel::toggleModelFavorite,
+                scrollTrigger = chatViewModel.scrollTrigger,
+                errorFlow = chatViewModel.errorFlow,
+                personaEnabled = uiState.personaEnabled,
+                onTogglePersona = chatViewModel::togglePersona,
+                backgroundIntensity = backgroundIntensity,
+                onOpenBackgroundLibrary = {
+                    setPendingBackgroundTarget(BackgroundTarget.Global)
+                    showBackgroundLibrary = true
+                },
+                onPickBackground = { requestBackgroundSelection(listOf(BackgroundChoice("全局", BackgroundTarget.Global))) },
+                onClearBackground = { chatViewModel.clearCustomBackground(BackgroundTarget.Global) },
+                promptPreviewState = promptPreviewState,
+                interCharacterRelations = uiState.interCharacterRelations,
+                onUpdateGroupScene = chatViewModel::updateGroupScene,
+                onRefreshPromptPreview = { chatViewModel.refreshPromptPreview() },
+                onNavigateBack = {
+                    selectedUniverseConversationId = null
+                    chatViewModel.returnToMainConversation()
+                },
+                appDisplayName = customizationState.appDisplayName
+            )
+        } else if (selectedCharacterForChat != null) {
             CharacterChatScreen(
                 character = selectedCharacterForChat,
                 uiState = uiState,
@@ -406,16 +554,41 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 onUpdateSystemPrompt = chatViewModel::updateSystemPrompt,
                 onToggleWebSearch = chatViewModel::toggleWebSearch,
                 onClearHistory = { characterId -> chatViewModel.clearCharacterChatHistory(characterId) },
-                onDeleteLastRound = { convId -> chatViewModel.deleteLastRound(convId) },
                 onSaveCharacter = { updated -> chatViewModel.saveCharacter(updated) },
                 getCharacterStoryState = chatViewModel::getCharacterStoryState,
                 getCharacterStoryLogs = chatViewModel::getCharacterStoryLogs,
+                onUpdateRelationshipAnchor = chatViewModel::updateRelationshipAnchor,
+                onRestoreAutomaticRelationshipAnchor = chatViewModel::restoreAutomaticRelationshipAnchor,
                 creativePresetText = settingsState.creativePresetText,
                 creativePresetEnabledForCharacter = settingsState.characterCreativePresetEnabled[selectedCharacterForChat.id] == true,
                 creativePresetAffectsPersonaForCharacter = settingsState.characterCreativePresetAffectsPersona[selectedCharacterForChat.id] == true,
-                onCreativePresetEnabledChange = settingsViewModel::onCharacterCreativePresetEnabledChange,
-                onCreativePresetAffectsPersonaChange = settingsViewModel::onCharacterCreativePresetAffectsPersonaChange,
-                onCreativePresetTextChange = settingsViewModel::onCreativePresetTextChange,
+                onCreativePresetEnabledChange = { characterId, enabled ->
+                    settingsViewModel.onCharacterCreativePresetEnabledChange(characterId, enabled)
+                    chatViewModel.updateCreativePresetSnapshot(characterId, enabled = enabled)
+                },
+                onCreativePresetAffectsPersonaChange = { characterId, enabled ->
+                    settingsViewModel.onCharacterCreativePresetAffectsPersonaChange(characterId, enabled)
+                    chatViewModel.updateCreativePresetSnapshot(characterId, affectsPersona = enabled)
+                },
+                onCreativePresetTextChange = { text ->
+                    settingsViewModel.onCreativePresetTextChange(text)
+                    chatViewModel.updateCreativePresetSnapshot(selectedCharacterForChat.id, text = text)
+                },
+                characterCreativePresetText = settingsState.characterCreativePresetTexts[selectedCharacterForChat.id].orEmpty(),
+                characterCreativePresetEnabled = settingsState.characterIndependentCreativePresetEnabled[selectedCharacterForChat.id] == true,
+                characterCreativePresetAffectsPersona = settingsState.characterIndependentCreativePresetAffectsPersona[selectedCharacterForChat.id] == true,
+                onCharacterCreativePresetTextChange = { text ->
+                    settingsViewModel.onCharacterCreativePresetTextChange(selectedCharacterForChat.id, text)
+                    chatViewModel.updateIndependentCreativePresetSnapshot(selectedCharacterForChat.id, text = text)
+                },
+                onCharacterCreativePresetEnabledChange = { characterId, enabled ->
+                    settingsViewModel.onCharacterIndependentCreativePresetEnabledChange(characterId, enabled)
+                    chatViewModel.updateIndependentCreativePresetSnapshot(characterId, enabled = enabled)
+                },
+                onCharacterCreativePresetAffectsPersonaChange = { characterId, enabled ->
+                    settingsViewModel.onCharacterIndependentCreativePresetAffectsPersonaChange(characterId, enabled)
+                    chatViewModel.updateIndependentCreativePresetSnapshot(characterId, affectsPersona = enabled)
+                },
                 backgroundIntensity = backgroundIntensity,
                 onPickBackground = {
                     requestBackgroundSelection(
@@ -457,12 +630,29 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 onDismissSceneImage = {
                     sceneGeneratedUrls = emptyList()
                     sceneGenError = null
-                }
+                },
+                promptPreviewState = promptPreviewState,
+                onRefreshPromptPreview = {
+                    chatViewModel.refreshPromptPreview(
+                        conversationId = uiState.conversations.firstOrNull { it.characterId == selectedCharacterForChat.id }?.id,
+                        characterId = selectedCharacterForChat.id
+                    )
+                },
+                onUpdateContextLayers = chatViewModel::updateConversationContextLayers,
+                onSummarizeHistory = chatViewModel::summarizeConversationNow,
+                onClearHistorySummary = chatViewModel::clearConversationHistorySummary
             )
         } else {
             Scaffold(
                 bottomBar = {
-                    NavigationBar {
+                    NavigationBar(containerColor = Color.Transparent, tonalElevation = 0.dp) {
+                        val navigationColors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            indicatorColor = Color.Transparent
+                        )
                         NavigationBarItem(
                             selected = currentTab == MainTab.Chat,
                             onClick = {
@@ -471,20 +661,26 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                 imageModeEnabled = false
                                 chatViewModel.returnToMainConversation()
                             },
-                            icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null) },
-                            label = { Text(context.getString(R.string.tab_chat)) }
+                            icon = { BottomIcon(customizationState.chatTabIconPath, bottomIcons.first) },
+                            label = if (customizationState.showBottomBarLabels) ({ Text(context.getString(R.string.tab_chat)) }) else null,
+                            alwaysShowLabel = customizationState.showBottomBarLabels,
+                            colors = navigationColors
                         )
                         NavigationBarItem(
                             selected = currentTab == MainTab.Character,
                             onClick = { currentTab = MainTab.Character },
-                            icon = { Icon(Icons.Filled.Person, contentDescription = null) },
-                            label = { Text(context.getString(R.string.tab_character)) }
+                            icon = { BottomIcon(customizationState.characterTabIconPath, bottomIcons.second) },
+                            label = if (customizationState.showBottomBarLabels) ({ Text(context.getString(R.string.tab_character)) }) else null,
+                            alwaysShowLabel = customizationState.showBottomBarLabels,
+                            colors = navigationColors
                         )
                         NavigationBarItem(
                             selected = currentTab == MainTab.Settings,
                             onClick = { currentTab = MainTab.Settings },
-                            icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
-                            label = { Text(context.getString(R.string.tab_settings)) }
+                            icon = { BottomIcon(customizationState.settingsTabIconPath, bottomIcons.third) },
+                            label = if (customizationState.showBottomBarLabels) ({ Text(context.getString(R.string.tab_settings)) }) else null,
+                            alwaysShowLabel = customizationState.showBottomBarLabels,
+                            colors = navigationColors
                         )
                     }
                 }
@@ -496,8 +692,18 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 ) {
                     when (currentTab) {
                         MainTab.Chat -> {
+                            val mainConversations = uiState.conversations.filter { it.isMainChatConversation() }
+                            val mainConversationId = uiState.currentConversationId
+                                ?.takeIf { currentId -> mainConversations.any { it.id == currentId } }
+                                ?: mainConversations.firstOrNull()?.id
+                            val mainUiState = uiState.copy(
+                                conversations = mainConversations,
+                                currentConversationId = mainConversationId,
+                                messages = if (uiState.currentConversationId == mainConversationId) uiState.messages else emptyList(),
+                                streamingAssistant = uiState.streamingAssistant?.takeIf { it.conversationId == mainConversationId }
+                            )
                             ChatScreenWithDrawer(
-                                uiState = uiState,
+                                uiState = mainUiState,
                                 onInputChange = chatViewModel::onInputChange,
                                 onSend = { chatViewModel.sendMessage() },
                                 onSendText = { chatViewModel.sendMessage(it) },
@@ -509,7 +715,7 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                     chatViewModel.exportConversation(context, conversationId, asMarkdown) { success, message ->
                                         Toast.makeText(
                                             context,
-                                            if (success) "已导出到 Downloads: $message" else "导出失败: $message",
+                                            if (success) "已导出: $message" else "导出失败: $message",
                                             Toast.LENGTH_SHORT
                                         ).show()
                                     }
@@ -521,11 +727,18 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                 onPersistImageAttachment = chatViewModel::persistImageAttachment,
                                 onPersistFileAttachment = chatViewModel::persistFileAttachment,
                                 onPersistCameraAttachment = chatViewModel::persistCameraAttachment,
-                                onSaveAttachmentImage = { uriString ->
-                                    chatViewModel.saveAttachmentImage(uriString) { msg ->
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                    }
-                                },
+                                 onSaveAttachmentImage = { uriString ->
+                                     if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                                         ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+                                     ) {
+                                         pendingAttachmentImageToSave = uriString
+                                         galleryPermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                     } else {
+                                         chatViewModel.saveAttachmentImage(uriString) { msg ->
+                                             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                         }
+                                     }
+                                 },
                                 onStopGeneration = chatViewModel::stopGeneration,
                                 onRetryLastUserMessage = chatViewModel::retryLastUserMessage,
                                 onRetryFromMessage = chatViewModel::retryFromUserMessage,
@@ -573,9 +786,14 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                  onGenerateImage = imageGenerationViewModel::generate,
                                  onStopImageGeneration = imageGenerationViewModel::stopGeneration,
                                  onSaveGeneratedImage = { imageGenerationViewModel.saveImage(context, it) },
-                                onReuseImagePrompt = imageGenerationViewModel::reusePrompt,
-                                onContinueImageFromResult = imageGenerationViewModel::continueFromImage
-                            )
+                                 onReuseImagePrompt = imageGenerationViewModel::reusePrompt,
+                                 onContinueImageFromResult = imageGenerationViewModel::continueFromImage,
+                                 promptPreviewState = promptPreviewState,
+                                 interCharacterRelations = uiState.interCharacterRelations,
+                                 onUpdateGroupScene = chatViewModel::updateGroupScene,
+                                 onRefreshPromptPreview = { chatViewModel.refreshPromptPreview() },
+                                 appDisplayName = customizationState.appDisplayName
+                             )
                         }
 
                         MainTab.Character -> {
@@ -583,9 +801,9 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                 StoryCreateScreen(
                                     onBack = { creatingStory = false },
                                     onStartStory = { title, premise, style, length, model ->
-                                        chatViewModel.createStoryConversation(title, premise, style, length, model) {
+                                        chatViewModel.createStoryConversation(title, premise, style, length, model) { conversationId ->
                                             creatingStory = false
-                                            currentTab = MainTab.Chat
+                                            selectedUniverseConversationId = conversationId
                                         }
                                     }
                                 )
@@ -614,6 +832,8 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                     conversations = uiState.conversations,
                                     creativePresetEnabledByCharacter = settingsState.characterCreativePresetEnabled,
                                     creativePresetAffectsPersonaByCharacter = settingsState.characterCreativePresetAffectsPersona,
+                                    characterPresetEnabledByCharacter = settingsState.characterIndependentCreativePresetEnabled,
+                                    characterPresetAffectsPersonaByCharacter = settingsState.characterIndependentCreativePresetAffectsPersona,
                                     onCreateCharacter = {
                                         creatingCharacter = true
                                         creatingStory = false
@@ -625,14 +845,13 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                         editingCharacterId = null
                                     },
                                     onCreateGroupChat = { characters ->
-                                        chatViewModel.createGroupConversation(characters)
-                                        currentTab = MainTab.Chat
-                                        selectedCharacterIdForChat = null
+                                        chatViewModel.createGroupConversation(characters) { conversationId ->
+                                            selectedUniverseConversationId = conversationId
+                                        }
                                     },
                                     onSelectConversation = {
                                         chatViewModel.selectConversation(it)
-                                        currentTab = MainTab.Chat
-                                        selectedCharacterIdForChat = null
+                                        selectedUniverseConversationId = it
                                     },
                                     onRenameConversation = chatViewModel::renameConversation,
                                     onDeleteConversation = chatViewModel::deleteConversation,
@@ -640,7 +859,7 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                         chatViewModel.exportConversation(context, conversationId, asMarkdown) { success, message ->
                                             Toast.makeText(
                                                 context,
-                                                if (success) "已导出到 Downloads: $message" else "导出失败: $message",
+                                                 if (success) "已导出: $message" else "导出失败: $message",
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         }
@@ -651,8 +870,9 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                     },
                                     onDeleteCharacter = chatViewModel::deleteCharacter,
                                     onSelectCharacter = { character ->
-                                        chatViewModel.createCharacterConversation(character)
-                                        selectedCharacterIdForChat = character.id
+                                        chatViewModel.createCharacterConversation(character) {
+                                            selectedCharacterIdForChat = character.id
+                                        }
                                     },
                                     onExportCharacter = { character ->
                                         chatViewModel.exportCharacterConversation(context, character.id) { ok, msg ->
@@ -704,7 +924,8 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                 onClearBackground = { chatViewModel.clearCustomBackground(BackgroundTarget.Global) },
                                 onClearBackgroundCache = chatViewModel::clearAllBackgrounds,
                                 onSelectiveCleanup = chatViewModel::performSelectiveCleanup,
-                                onThemeModeChange = settingsViewModel::onThemeModeChange,
+                                 onThemeModeChange = settingsViewModel::onThemeModeChange,
+                                 onThemePaletteChange = settingsViewModel::onThemePaletteChange,
                                 onAutoThemeSuggestionEnabledChange = settingsViewModel::onAutoThemeSuggestionEnabledChange,
                                 onToggleWebSearch = chatViewModel::toggleWebSearch,
                                 onToggleStream = settingsViewModel::toggleStream,
@@ -728,6 +949,10 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                 backgroundIntensity = settingsState.backgroundIntensity,
                                 onImageProviderChange = settingsViewModel::onImageProviderChange,
                                 onImageModelNameChange = settingsViewModel::onImageModelNameChange,
+                                onSummaryBaseUrlChange = settingsViewModel::onSummaryBaseUrlChange,
+                                onSummaryApiKeyChange = settingsViewModel::onSummaryApiKeyChange,
+                                onSummaryModelNameChange = settingsViewModel::onSummaryModelNameChange,
+                                onAutoSummaryThresholdChange = settingsViewModel::onAutoSummaryThresholdChange,
                                 onBackgroundIntensityChange = settingsViewModel::onBackgroundIntensityChange,
                                 onSaveSearchSettings = settingsViewModel::saveSearchSettings,
                                 personaEnabled = settingsState.personaEnabled,
@@ -741,7 +966,20 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                 onArchiveMemory = memoryViewModel::archive,
                                 onUpdateMemory = memoryViewModel::update,
                                 onExportMemory = { memoryExportLauncher.launch("hana_memory_${System.currentTimeMillis()}.json") },
-                                onImportMemory = { memoryImportLauncher.launch(arrayOf("application/json", "text/plain")) }
+                                onImportMemory = { memoryImportLauncher.launch(arrayOf("application/json", "text/plain")) },
+                                customization = customizationState,
+                                onCustomizationDisplayNameChange = customizationViewModel::saveDisplayName,
+                                onCustomizationSplashDurationChange = customizationViewModel::saveSplashDuration,
+                                onCustomizationCroppedSplashSave = customizationViewModel::saveCroppedSplash,
+                                onCustomizationSplashClear = customizationViewModel::clearSplash,
+                                onCustomizationGenerationHapticChange = customizationViewModel::saveGenerationHaptic,
+                                onCustomizationChatDisplaySave = customizationViewModel::saveChatDisplay,
+                                onCustomizationNavigationIconsClear = customizationViewModel::clearNavigationIcons,
+                                onCustomizationCroppedAssetSave = customizationViewModel::saveCroppedAsset,
+                                onCustomizationBubbleImagesClear = customizationViewModel::clearBubbleImages,
+                                onCustomizationAssetClear = customizationViewModel::clearAsset,
+                                onCustomizationBubbleFixedEdgeChange = customizationViewModel::saveBubbleFixedEdge,
+                                onCustomizationDesktopShortcutRequest = customizationViewModel::requestDesktopShortcut
                             )
                         }
                     }
@@ -832,10 +1070,11 @@ private fun WorkspaceApp(appContainer: AppContainer) {
         var hasShownThisSession by remember { mutableStateOf(false) }
         val settingsRepo = remember { SettingsRepository(context) }
         val currentVersion = BuildConfig.VERSION_NAME
+        val currentChangelogId = "$currentVersion-relationship-r3"
 
         LaunchedEffect(Unit) {
             settingsRepo.getLastSeenChangelogVersion().collect { seen ->
-                if (!hasShownThisSession && seen != currentVersion && currentVersion.isNotBlank()) {
+                if (!hasShownThisSession && seen != currentChangelogId && currentVersion.isNotBlank()) {
                     showChangelog = true
                     hasShownThisSession = true
                 }
@@ -845,14 +1084,10 @@ private fun WorkspaceApp(appContainer: AppContainer) {
         if (showChangelog) {
             UpdateChangelogDialog(
                 versionName = currentVersion,
-                changelog = CHANGELOG_V1_7_5,
+                changelog = CHANGELOG_V1_8_0,
                 onDismiss = { showChangelog = false },
-                onDontShowAgain = { dontShow ->
-                    appScope.launch {
-                        if (dontShow) {
-                            settingsRepo.markChangelogSeen(currentVersion)
-                        }
-                    }
+                onAcknowledge = {
+                    appScope.launch { settingsRepo.markChangelogSeen(currentChangelogId) }
                 }
             )
         }
@@ -860,26 +1095,55 @@ private fun WorkspaceApp(appContainer: AppContainer) {
 }
 
 /**
- * v1.7.5 更新内容，供弹窗显示。
+ * v1.8.0 更新内容，供弹窗显示。
  */
-private val CHANGELOG_V1_7_5 = """
-### 回复质量大幅优化（重要）
+private val CHANGELOG_V1_8_0 = """
+### 大量个性化
 
-- 锚点新增「剧情回应要求」：强制逐一回应所有剧情点，不再只读最后两个
-- 风格样本精简（8条→5条，每条400字→300字），释放 ~1000 tokens 给用户消息
-- 上下文压缩阈值 30轮→10轮，让摘要机制默认生效，防止 token 溢出
-- 单条消息截断 16000字→8000字，防止超长消息撑爆上下文
-- 历史摘要优化为结构化事件列表，参考 OpenTavern 总结机制
+- 新增跟随系统、浅色、深色与五组推荐颜色
+- 支持应用内名称、自定义桌面入口、开屏图片与显示时长
+- 支持三个底栏图标独立选择、裁剪、清除和整组恢复
+- 支持 AI 与用户气泡图片、九宫格拉伸和固定边缘调整
+- 个性化配置和原图独立持久化，覆盖更新后继续保留
 
-### Bug 修复
+### 聊天显示
 
-- 角色卡导入头像空白：PNG角色卡导入时自动保存图片为本地头像
-- 更新推送弹窗重复弹出：增加 hasShownThisSession 守卫，每次启动只弹一次
+- 新增字体大小、聊天密度、气泡最大宽度和输入框宽度
+- 输入框高度会真实改变最小高度和可见行数
+- 可控制消息头像、消息时间与底栏文字
+- 主对话、群聊和角色聊天统一使用同一套显示配置
+- 设置页提供即时预览、草稿状态和标准方案恢复
 
-### 交互优化
+### 桌面入口与资源管理
 
-- 用户消息支持一键复制（三点菜单），与角色消息一致
-- 蓝色气泡内选中文字可见性修复：高亮色改为半透明白色
+- 自定义桌面入口支持更新已有名称和图标
+- 支持单独清除任意底栏图标、桌面图标或一侧气泡素材
+- 图片保存失败时恢复旧文件，避免个性化资源丢失
+- 超大相册图片使用采样解码，降低裁剪和旧设备开屏崩溃风险
+
+### 角色聊天与安全操作
+
+- 模型设定、破甲提示和角色面板使用独立入口
+- 角色模型和参数按照真实请求优先级保存
+- 重新生成只针对有效助手回复
+- 重置当前对话会恢复开场白并明确重置关系状态
+- 会话、服务商和清空全部对话等危险操作补充确认
+
+### 关系与内心算法迭代
+
+- 好感、信任和紧张只由用户事件与角色公开回应成对确认，内心不再直接改写长期关系
+- 一轮复合互动按事件类型去重分析，威胁和冲突不会与告白、支持等信号重复累计
+- 引用、假设、否定、第三方转述和其他角色台词不会污染当前角色关系
+- 内心想法只用于即时状态解释，并与其他角色的公开认知严格隔离
+- 多角色公开正文按角色名前缀拆分，未闭合内心标签不会在流式输出时泄漏到正文
+- 角色间关系分析忽略私密内心、引用和假设，只记录明确公开的支持、竞争或敌意
+
+### 稳定性
+
+- 修复角色会话初始化期间快速发送可能串到主对话的问题
+- 修复数据库半迁移时重复字段导致的启动崩溃
+- 修复语言切换重建、Prompt 状态检测和生图配置污染问题
+- 补齐英文资源并通过 Debug Lint 与 Release Lint Vital
 """.trimIndent()
 
 /**

@@ -88,11 +88,13 @@ class MemoryRepository(
             val item = items.optJSONObject(i) ?: continue
             val content = item.optString("content").trim()
             if (content.isBlank()) continue
-            val existing = dao.findByScopeAndContent(MemoryScope.MAIN, content)
-            if (existing == null) {
-                dao.insert(
+            if (dao.findByScopeAndContent(MemoryScope.MAIN, content) == null) {
+                val importedId = item.optString("id").trim()
+                val safeId = importedId.takeIf { it.isNotBlank() && dao.getById(it) == null }
+                    ?: UUID.randomUUID().toString()
+                val inserted = dao.insertIfAbsent(
                     MemoryEntryEntity(
-                        id = item.optString("id").ifBlank { UUID.randomUUID().toString() },
+                        id = safeId,
                         scope = MemoryScope.MAIN,
                         type = item.optString("type").ifBlank { "事实" },
                         content = content,
@@ -104,7 +106,7 @@ class MemoryRepository(
                         isArchived = item.optBoolean("isArchived", false)
                     )
                 )
-                imported++
+                if (inserted != -1L) imported++
             }
         }
         return imported

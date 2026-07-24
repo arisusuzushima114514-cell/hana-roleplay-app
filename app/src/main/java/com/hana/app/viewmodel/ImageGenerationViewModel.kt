@@ -86,8 +86,8 @@ class ImageGenerationViewModel(
                         imageModelName = settings.imageModelName.ifBlank { settings.selectedModel },
                         imageProviderName = if (settings.imageModelName.isBlank()) "跟随文本源" else (provider?.name ?: "当前文字服务商"),
                         negativePromptZh = it.negativePromptZh,
-                        creativePresetEnabled = settings.creativePresetText.isNotBlank(),
-                        creativePresetSummary = settings.creativePresetText.trim().replace("\n", " ").take(72)
+                        creativePresetEnabled = false,
+                        creativePresetSummary = ""
                     )
                 }
             }
@@ -175,16 +175,12 @@ class ImageGenerationViewModel(
                 negativePromptZh = state.negativePromptZh
             )
             val prompt = ImagePromptTranslator.build(form)
-            val finalPrompt = applyCreativePresetToImagePrompt(
-                prompt = prompt.englishPrompt,
-                creativePreset = settings.creativePresetText,
-                enabled = settings.creativePresetText.isNotBlank()
-            )
+            val finalPrompt = prompt.englishPrompt
             Log.d(
                 "ImageGenVM",
                 buildString {
                     append("image prompt build: creativePresetLength=")
-                    append(settings.creativePresetText.trim().length)
+                    append(0)
                     append(", basePromptLength=")
                     append(prompt.englishPrompt.length)
                     append(", finalPromptLength=")
@@ -228,13 +224,7 @@ class ImageGenerationViewModel(
                     referenceImageDataUrls = referenceImageDataUrls
                 )
             ).onSuccess { result ->
-                val revisedPromptWithPreset = result.revisedPrompt?.let { revised ->
-                    applyCreativePresetToImagePrompt(
-                        prompt = revised,
-                        creativePreset = settings.creativePresetText,
-                        enabled = settings.creativePresetText.isNotBlank()
-                    )
-                }
+                val revisedPromptWithPreset = result.revisedPrompt
                 val displayUrls = result.imageUrls.mapIndexedNotNull { index, url ->
                     val localUri = attachmentService.persistGeneratedImage(
                         url = url,
@@ -374,11 +364,7 @@ class ImageGenerationViewModel(
                 return@launch
             }
 
-            val finalPrompt = applyCreativePresetToImagePrompt(
-                prompt = promptEn,
-                creativePreset = settings.creativePresetText,
-                enabled = settings.creativePresetText.isNotBlank()
-            )
+            val finalPrompt = promptEn
 
             imageGenerationService.generate(
                 provider = provider,
