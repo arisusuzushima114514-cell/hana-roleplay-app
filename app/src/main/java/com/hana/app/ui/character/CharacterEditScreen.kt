@@ -88,6 +88,7 @@ fun CharacterEditScreen(
     var avatarUrl by remember { mutableStateOf(initialCharacter?.avatarUrl.orEmpty()) }
     var description by remember { mutableStateOf(initialCharacter?.description.orEmpty()) }
     var greeting by remember { mutableStateOf(initialCharacter?.greeting.orEmpty()) }
+    var defaultStoryPreface by remember { mutableStateOf(initialCharacter?.defaultStoryPreface.orEmpty()) }
     var userPersona by remember { mutableStateOf(initialCharacter?.userPersona.orEmpty()) }
     var tags by remember { mutableStateOf(initialCharacter?.tags.orEmpty()) }
     var showAvatarDialog by remember { mutableStateOf(false) }
@@ -138,7 +139,8 @@ fun CharacterEditScreen(
             lastMessageAt = initialCharacter?.lastMessageAt ?: 0L,
             lastMessagePreview = initialCharacter?.lastMessagePreview.orEmpty(),
             characterMode = initialCharacter?.characterMode ?: CHARACTER_MODE_SINGLE,
-            subCharactersJson = initialCharacter?.subCharactersJson ?: EMPTY_SUB_CHARACTERS_JSON
+            subCharactersJson = initialCharacter?.subCharactersJson ?: EMPTY_SUB_CHARACTERS_JSON,
+            defaultStoryPreface = defaultStoryPreface.trim()
         )
     }
 
@@ -256,6 +258,32 @@ fun CharacterEditScreen(
                         label = { Text("角色名称") },
                         placeholder = { Text(stringResource(R.string.character_name_hint)) },
                         singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            unfocusedBorderColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("剧情前言", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = defaultStoryPreface,
+                        onValueChange = { defaultStoryPreface = it },
+                        label = { Text("首次进入聊天时显示在开场白上方") },
+                        placeholder = { Text("例如：雨夜的咖啡馆里，故事从这次重逢开始。") },
+                        supportingText = { Text("创建新角色会话时自动带入；之后可在聊天页单独修改。") },
+                        minLines = 3,
+                        maxLines = 10,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
                         colors = OutlinedTextFieldDefaults.colors(

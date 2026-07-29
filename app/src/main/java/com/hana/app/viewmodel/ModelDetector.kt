@@ -11,6 +11,10 @@ fun isReasoningModel(modelName: String?): Boolean {
 fun isFlashModel(modelName: String?): Boolean {
     if (modelName.isNullOrBlank()) return false
     val lower = modelName.lowercase()
-    return listOf("flash", "mini", "turbo", "lite", "qwen2.5", "gpt-4o-mini", "gpt-3.5").any { lower.contains(it) }
-        && !isReasoningModel(modelName)
+    // Do not match "mini" inside the Gemini brand name: gemini-*-pro is not a fast model.
+    val fastName = listOf("flash", "turbo", "lite", "qwen2.5", "gpt-4o-mini", "gpt-3.5")
+        .any { lower.contains(it) } || Regex("(?:^|[-_/])mini(?:$|[-_/])").containsMatchIn(lower)
+    return fastName && !isReasoningModel(modelName)
 }
+
+internal fun streamUiFlushIntervalMs(modelName: String?): Long = if (isFlashModel(modelName)) 90L else 32L

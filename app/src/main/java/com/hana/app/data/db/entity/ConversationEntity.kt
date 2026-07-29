@@ -28,6 +28,8 @@ data class ConversationEntity(
     val worldInfo: String? = null,
     val groupScene: String? = null,
     val groupSceneLocked: Boolean = false,
+    val sceneRoleStatesJson: String = "",
+    val ensembleCoverageJson: String = "",
     val summaryUpToMessageId: Long? = null,
     val totalTokens: Int = 0,
     val isPinned: Boolean = false,

@@ -114,6 +114,72 @@ fun PromptPreviewDialog(
                                 }
                             }
                         }
+                        if (state.ensembleStates.isNotEmpty()) {
+                            val coverage = state.ensembleCoverage
+                            Surface(
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                                color = if (coverage?.isComplete == false) {
+                                    MaterialTheme.colorScheme.errorContainer
+                                } else {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                },
+                                shape = MaterialTheme.shapes.medium
+                            ) {
+                                Column(Modifier.padding(12.dp)) {
+                                    Text("群像场景状态", fontWeight = FontWeight.Bold)
+                                    Text(
+                                        state.ensembleStates.joinToString("；") {
+                                            "${it.name}: ${it.participation} / ${it.status}"
+                                        },
+                                        modifier = Modifier.padding(top = 4.dp),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    if (coverage == null) {
+                                        Text(
+                                            "尚无已保存的群像验收结果。下一次结构化多角色回复后将自动记录，仅诊断，不会重写回复。",
+                                            modifier = Modifier.padding(top = 6.dp),
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    } else {
+                                        Text(
+                                            "群像完成度：${coverage.completedObligations} / ${coverage.expectedObligations}" +
+                                                if (coverage.isComplete) " · 已完成" else " · 存在缺失",
+                                            modifier = Modifier.padding(top = 6.dp),
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            "输出预算：可用 ${coverage.availableTokens} · 最低覆盖 ${coverage.requiredTokens}",
+                                            modifier = Modifier.padding(top = 3.dp),
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                        if (coverage.repairAttempted) {
+                                            Text(
+                                                "自动完整重写：已执行 · ${when {
+                                                    coverage.repairRequestFailed -> "重写请求失败，已回退保存首版"
+                                                    coverage.repairSucceeded -> "二次验收通过"
+                                                    else -> "二次验收仍有缺失"
+                                                }}",
+                                                modifier = Modifier.padding(top = 3.dp),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                        if (coverage.missingObligations.isNotEmpty()) {
+                                            Text(
+                                                "最新缺失：${coverage.missingObligations.joinToString("；")}",
+                                                modifier = Modifier.padding(top = 3.dp),
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                        Text(
+                                            "群像修复最多执行一次，不会改变角色状态或无限重试。",
+                                            modifier = Modifier.padding(top = 5.dp),
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         state.messages.forEach { message ->
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),

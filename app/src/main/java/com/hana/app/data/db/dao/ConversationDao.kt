@@ -93,6 +93,15 @@ interface ConversationDao {
     @Query("UPDATE conversations SET groupScene = :groupScene, groupSceneLocked = :locked, updatedAt = :updatedAt WHERE id = :id")
     suspend fun updateGroupScene(id: String, groupScene: String?, locked: Boolean, updatedAt: Long)
 
+    @Query("UPDATE conversations SET sceneRoleStatesJson = :sceneRoleStatesJson, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateSceneRoleStates(id: String, sceneRoleStatesJson: String, updatedAt: Long)
+
+    @Query("UPDATE conversations SET ensembleCoverageJson = :ensembleCoverageJson WHERE id = :id")
+    suspend fun updateEnsembleCoverage(id: String, ensembleCoverageJson: String)
+
+    @Query("UPDATE conversations SET sceneRoleStatesJson = :sceneRoleStatesJson, ensembleCoverageJson = '', updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateSceneRoleStatesAndClearCoverage(id: String, sceneRoleStatesJson: String, updatedAt: Long)
+
     @Query("UPDATE conversations SET totalTokens = totalTokens + :tokens, updatedAt = :updatedAt WHERE id = :id")
     suspend fun addTokenUsage(id: String, tokens: Int, updatedAt: Long)
 

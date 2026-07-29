@@ -46,6 +46,7 @@ class ApiService(
         maxTokens: Int = 4096,
         timeoutSeconds: Long = 60L,
         webSearch: Boolean = false,
+        uiFlushIntervalMs: Long = 32L,
         onDelta: suspend (StreamDelta) -> Unit
     ): Result<StreamResult> = withContext(Dispatchers.IO) {
         var call: okhttp3.Call? = null
@@ -78,9 +79,9 @@ class ApiService(
             var totalTokens: Int? = null
             val client = okHttpClient.newBuilder()
                 .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout((timeoutSeconds * 2).coerceAtLeast(120), TimeUnit.SECONDS)
+                .readTimeout(timeoutSeconds.coerceIn(10L, 300L), TimeUnit.SECONDS)
                 .writeTimeout(30, TimeUnit.SECONDS)
-                .callTimeout((timeoutSeconds * 2).coerceAtLeast(180), TimeUnit.SECONDS)
+                .callTimeout(timeoutSeconds.coerceIn(10L, 300L), TimeUnit.SECONDS)
                 .build()
             call = client.newCall(request)
             activeCall.set(call)
@@ -129,7 +130,7 @@ class ApiService(
                             pendingContent.append(delta.content)
                         }
                         val elapsedMs = (System.nanoTime() - lastUiFlushAt) / 1_000_000L
-                        if (elapsedMs >= 32L || pendingContent.length + pendingReasoning.length >= 256) {
+                        if (elapsedMs >= uiFlushIntervalMs.coerceAtLeast(16L) || pendingContent.length + pendingReasoning.length >= 256) {
                             flushPendingDelta()
                         }
                     }
@@ -204,9 +205,9 @@ class ApiService(
 
             val client = okHttpClient.newBuilder()
                 .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout((timeoutSeconds * 2).coerceAtLeast(120), TimeUnit.SECONDS)
+                .readTimeout(timeoutSeconds.coerceIn(10L, 300L), TimeUnit.SECONDS)
                 .writeTimeout(30, TimeUnit.SECONDS)
-                .callTimeout((timeoutSeconds * 2).coerceAtLeast(180), TimeUnit.SECONDS)
+                .callTimeout(timeoutSeconds.coerceIn(10L, 300L), TimeUnit.SECONDS)
                 .build()
 
             call = client.newCall(request)

@@ -177,9 +177,9 @@ class SettingsRepository(context: Context) {
 
     val languageFlow: Flow<String> = settingsFlow.map { it.language }
 
-    /** 获取缓存的 settings，避免每次调用都走 DataStore 的 first() */
+    /** Request-time callers must observe the persisted snapshot rather than startup defaults. */
     suspend fun getSettings(): SettingsData {
-        return cachedSettings
+        return settingsFlow.first()
     }
 
     suspend fun getApiSettings(): ApiSettings {
@@ -222,7 +222,7 @@ class SettingsRepository(context: Context) {
 
     suspend fun saveApiSettings(settings: ApiSettings) {
         dataStore.edit { preferences ->
-            preferences[KEY_API_BASE_URL] = settings.baseUrl.trim().trimEnd('/')
+            preferences[KEY_API_BASE_URL] = normalizeApiBaseUrl(settings.baseUrl)
             preferences[KEY_API_KEY] = normalizeSecret(settings.apiKey)
             preferences[KEY_SELECTED_MODEL] = settings.modelName.trim()
         }
@@ -252,7 +252,7 @@ class SettingsRepository(context: Context) {
     suspend fun saveBaseUrl(baseUrl: String) {
         try {
             dataStore.edit { preferences ->
-                preferences[KEY_API_BASE_URL] = baseUrl.trim()
+                preferences[KEY_API_BASE_URL] = normalizeApiBaseUrl(baseUrl)
             }
         } catch (e: Exception) { Log.e("SettingsRepo", "saveBaseUrl failed", e) }
     }

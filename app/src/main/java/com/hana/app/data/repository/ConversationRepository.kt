@@ -52,6 +52,7 @@ class ConversationRepository(
             createdAt = now,
             updatedAt = now,
             lastMessage = character.greeting,
+            authorNote = character.defaultStoryPreface.trim().takeIf { it.isNotBlank() },
             isNamed = false,
             temperature = 0.9f,
             contextLimit = DEFAULT_CONTEXT_LIMIT
@@ -149,6 +150,22 @@ class ConversationRepository(
             locked,
             System.currentTimeMillis()
         )
+    }
+
+    suspend fun updateSceneRoleStates(conversationId: String, sceneRoleStatesJson: String) {
+        dao.updateSceneRoleStates(conversationId, sceneRoleStatesJson, System.currentTimeMillis())
+    }
+
+    suspend fun updateSceneRoleStatesAndClearCoverage(conversationId: String, sceneRoleStatesJson: String) {
+        dao.updateSceneRoleStatesAndClearCoverage(
+            conversationId,
+            sceneRoleStatesJson,
+            System.currentTimeMillis()
+        )
+    }
+
+    suspend fun updateEnsembleCoverage(conversationId: String, ensembleCoverageJson: String) {
+        dao.updateEnsembleCoverage(conversationId, ensembleCoverageJson)
     }
 
     suspend fun addTokenUsage(conversation: ConversationEntity, tokens: Int) {

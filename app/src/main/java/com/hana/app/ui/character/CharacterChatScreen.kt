@@ -73,6 +73,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -135,6 +136,7 @@ import com.hana.app.R
 import com.hana.app.data.db.entity.CharacterCardEntity
 import com.hana.app.data.db.entity.ChatMessageEntity
 import com.hana.app.data.db.entity.ConversationEntity
+import com.hana.app.data.db.entity.subCharacters
 import com.hana.app.data.settings.CharacterStoryLogEntry
 import com.hana.app.data.settings.CharacterStoryState
 import com.hana.app.ui.chat.ThinkingBlock
@@ -148,6 +150,11 @@ import com.hana.app.ui.theme.NineSliceImage
 import java.io.File
 import com.hana.app.viewmodel.ChatUiState
 import com.hana.app.viewmodel.PromptPreviewState
+import com.hana.app.viewmodel.SceneRoleState
+import com.hana.app.viewmodel.EnsembleSceneContract
+import com.hana.app.viewmodel.SCENE_PARTICIPATION_INNER_ONLY
+import com.hana.app.viewmodel.SCENE_PARTICIPATION_PUBLIC
+import com.hana.app.viewmodel.SCENE_PARTICIPATION_UNAVAILABLE
 import com.hana.app.viewmodel.relationshipStageLabel
 import com.hana.app.viewmodel.latestPersistedAssistantMessage
 import kotlinx.coroutines.delay
@@ -172,7 +179,7 @@ fun CharacterChatScreen(
     onRegenerateMessage: (ChatMessageEntity) -> Unit,
     onEditMessage: (ChatMessageEntity, String) -> Unit,
     onStopGeneration: () -> Unit,
-    onRetryLastUserMessage: () -> Unit,
+    onRetryFailedMessage: (ChatMessageEntity) -> Unit,
     onUpdateConversationParameters: (String?, Float, Float, Int, Int, String?) -> Unit,
     onUpdateSystemPrompt: (String, String?) -> Unit,
     onToggleWebSearch: () -> Unit,
@@ -210,6 +217,7 @@ fun CharacterChatScreen(
     promptPreviewState: PromptPreviewState = PromptPreviewState(),
     onRefreshPromptPreview: () -> Unit = {},
     onUpdateContextLayers: (String, String, String) -> Unit = { _, _, _ -> },
+    onUpdateSceneRoleStates: (String, List<SceneRoleState>) -> Unit = { _, _ -> },
     onSummarizeHistory: (String) -> Unit = {},
     onClearHistorySummary: (String) -> Unit = {}
 ) {
@@ -290,14 +298,17 @@ fun CharacterChatScreen(
     var moreMenuExpanded by remember { mutableStateOf(false) }
     var showPromptPreview by remember { mutableStateOf(false) }
     var showContextLayers by remember { mutableStateOf(false) }
+    var showSceneRoleStates by remember { mutableStateOf(false) }
     var showInnerThoughtEntry by rememberSaveable { mutableStateOf(true) }
     val snackbarHostState = remember { SnackbarHostState() }
     val screenScope = rememberCoroutineScope()
 
-    BackHandler(enabled = activeEditorScreen != null || showSettingsSheet || showParameters || showSystemPrompt || showClearConfirm || moreMenuExpanded || showStorylineSheet) {
+    BackHandler(enabled = activeEditorScreen != null || showSettingsSheet || showParameters || showSystemPrompt || showClearConfirm || moreMenuExpanded || showStorylineSheet || showContextLayers || showSceneRoleStates) {
         when {
             activeEditorScreen != null -> activeEditorScreen = null
             showStorylineSheet -> showStorylineSheet = false
+            showSceneRoleStates -> showSceneRoleStates = false
+            showContextLayers -> showContextLayers = false
             moreMenuExpanded -> moreMenuExpanded = false
             showClearConfirm -> showClearConfirm = false
             showSystemPrompt -> showSystemPrompt = false
@@ -540,13 +551,23 @@ fun CharacterChatScreen(
                                 leadingIcon = { Icon(Icons.Filled.ContentCopy, contentDescription = null) }
                             )
                             DropdownMenuItem(
-                                text = { Text("上下文层") },
+                                text = { Text("剧情前言") },
                                 onClick = {
                                     moreMenuExpanded = false
                                     showContextLayers = true
                                 },
                                 leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) }
                             )
+                            if (com.hana.app.data.db.entity.parseSubCharacterProfiles(liveCharacter.subCharactersJson).isNotEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text("场景角色状态") },
+                                    onClick = {
+                                        moreMenuExpanded = false
+                                        showSceneRoleStates = true
+                                    },
+                                    leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) }
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text("模型设定") },
                                 onClick = {
@@ -719,6 +740,26 @@ fun CharacterChatScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(messageSpacing)
                 ) {
+                    conversation?.authorNote?.trim()?.takeIf { it.isNotBlank() }?.let { preface ->
+                        item(key = "story-preface") {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("剧情前言", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = preface,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        maxLines = 8,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
                     items(messages, key = { it.id }) { message ->
                         val isStreaming = message.id == Long.MIN_VALUE
                         val isGreeting = message.id == -1L && message.role == "assistant"
@@ -802,7 +843,7 @@ fun CharacterChatScreen(
                                     onDeleteMessage = if (isGreeting) null else onDeleteMessage,
                                     onRegenerateMessage = if (isGreeting) null else onRegenerateMessage,
                                     onEditMessage = if (isGreeting) null else onEditMessage,
-                                    onRetryLastUserMessage = onRetryLastUserMessage,
+                                    onRetryFailedMessage = onRetryFailedMessage,
                                     snackbarHostState = snackbarHostState
                             )
                         }
@@ -1139,6 +1180,18 @@ fun CharacterChatScreen(
         )
     }
 
+    if (showSceneRoleStates && conversation != null) {
+        SceneRoleStatesDialog(
+            conversation = conversation,
+            profiles = com.hana.app.data.db.entity.parseSubCharacterProfiles(liveCharacter.subCharactersJson),
+            onDismiss = { showSceneRoleStates = false },
+            onSave = { states ->
+                onUpdateSceneRoleStates(conversation.id, states)
+                showSceneRoleStates = false
+            }
+        )
+    }
+
     // 场景捕捉错误通过 Snackbar 显示
     LaunchedEffect(sceneImageError) {
         sceneImageError?.let { error ->
@@ -1315,7 +1368,7 @@ private fun CharacterContextLayersDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("角色上下文层") },
+        title = { Text("剧情前言") },
         text = {
             Column(
                 modifier = Modifier
@@ -1325,14 +1378,14 @@ private fun CharacterContextLayersDialog(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    "注入顺序：固定角色卡与主线 -> 世界信息 -> 历史摘要 -> 最近原文 -> 作者注释 -> 创作预设。",
+                    "剧情前言会显示在本对话第一条消息上方，并在本轮回复前优先注入。世界设定可选，用于长期稳定规则。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 OutlinedTextField(
                     value = worldInfo,
                     onValueChange = { worldInfo = it },
-                    label = { Text("世界信息") },
+                    label = { Text("世界设定（可选）") },
                     supportingText = { Text("长期稳定的世界规则、地点、组织和人物关系。") },
                     minLines = 5,
                     modifier = Modifier.fillMaxWidth()
@@ -1340,8 +1393,8 @@ private fun CharacterContextLayersDialog(
                 OutlinedTextField(
                     value = authorNote,
                     onValueChange = { authorNote = it },
-                    label = { Text("作者注释") },
-                    supportingText = { Text("靠近本轮回复注入，适合当前场景节奏、视角和临时重点。") },
+                    label = { Text("剧情前言") },
+                    supportingText = { Text("适合当前场景、开场状态、视角和本段剧情重点。") },
                     minLines = 4,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -1366,6 +1419,88 @@ private fun CharacterContextLayersDialog(
             }
         },
         confirmButton = { TextButton(onClick = { onSave(worldInfo, authorNote) }) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@Composable
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+private fun SceneRoleStatesDialog(
+    conversation: ConversationEntity,
+    profiles: List<com.hana.app.data.db.entity.SubCharacterProfile>,
+    onDismiss: () -> Unit,
+    onSave: (List<SceneRoleState>) -> Unit
+) {
+    var states by remember(conversation.id, conversation.sceneRoleStatesJson, profiles) {
+        mutableStateOf(EnsembleSceneContract.resolveStates(conversation.sceneRoleStatesJson, profiles))
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("当前场景角色") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "只由你显式更新。模型漏答不会改变状态；保存后会清除旧完成率，下一次回复按新契约重新验收。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                states.forEachIndexed { index, state ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(7.dp)
+                        ) {
+                            Text(state.name, fontWeight = FontWeight.SemiBold)
+                            androidx.compose.foundation.layout.FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(
+                                    SCENE_PARTICIPATION_PUBLIC to "公开参与",
+                                    SCENE_PARTICIPATION_INNER_ONLY to "意识参与",
+                                    SCENE_PARTICIPATION_UNAVAILABLE to "不可参与"
+                                ).forEach { (value, label) ->
+                                    FilterChip(
+                                        selected = state.participation == value,
+                                        onClick = {
+                                            states = states.toMutableList().apply {
+                                                set(index, state.copy(
+                                                    participation = value,
+                                                    status = if (value == SCENE_PARTICIPATION_UNAVAILABLE) "unavailable" else "active"
+                                                ))
+                                            }
+                                        },
+                                        label = { Text(label) }
+                                    )
+                                }
+                            }
+                            OutlinedTextField(
+                                value = state.context,
+                                onValueChange = { context ->
+                                    states = states.toMutableList().apply { set(index, state.copy(context = context)) }
+                                },
+                                label = { Text("场景备注") },
+                                placeholder = { Text("例如：在门外等待；与宿主共享感官；昏睡无法回应") },
+                                minLines = 1,
+                                maxLines = 3,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(states) }) { Text("保存状态") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
 }
@@ -1732,7 +1867,7 @@ private fun CharacterMessageBubble(
     onDeleteMessage: ((ChatMessageEntity) -> Unit)?,
     onRegenerateMessage: ((ChatMessageEntity) -> Unit)?,
     onEditMessage: ((ChatMessageEntity, String) -> Unit)?,
-    onRetryLastUserMessage: () -> Unit,
+    onRetryFailedMessage: (ChatMessageEntity) -> Unit,
     snackbarHostState: SnackbarHostState
     ,textStyle: androidx.compose.ui.text.TextStyle
 ) {
@@ -1848,7 +1983,7 @@ private fun CharacterMessageBubble(
                             )
                         }
                         if (message.isError) {
-                            TextButton(onClick = onRetryLastUserMessage, modifier = Modifier.align(Alignment.End)) {
+                            TextButton(onClick = { onRetryFailedMessage(message) }, modifier = Modifier.align(Alignment.End)) {
                                 Text("重试")
                             }
                         }

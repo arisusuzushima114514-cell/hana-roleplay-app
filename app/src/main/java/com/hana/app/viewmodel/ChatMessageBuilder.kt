@@ -8,6 +8,7 @@ import com.hana.app.data.db.entity.ConversationEntity
 import com.hana.app.data.db.entity.isMainChatConversation
 import com.hana.app.data.db.entity.isGroupConversation
 import com.hana.app.data.db.entity.parseSubCharacterProfiles
+import com.hana.app.data.db.entity.subCharacters
 import com.hana.app.data.repository.CharacterRepository
 import com.hana.app.data.repository.ConversationRepository
 import com.hana.app.data.repository.MemoryRepository
@@ -70,7 +71,8 @@ class ChatMessageBuilder(
         val isGroupConversation = conversation?.let { isGroupConversation(it) } == true
         val isMainConversation = conversation?.isMainChatConversation() == true
         val history = messageRepository.getMessages(conversationId)
-            .filter { !it.isError || (it.role == "assistant" && it.content.isNotBlank()) }
+            // Local failure notices are visible UI only, never canonical conversation history.
+            .filterNot { it.isError }
             .filter { historyUpToMessageId == null || it.id <= historyUpToMessageId }
         val conversationCharacter = conversation?.characterId?.let { characterRepository.getById(it) }
         val settingsSnapshot = settingsRepository.getSettings()
@@ -229,13 +231,36 @@ class ChatMessageBuilder(
         }
 
         val contextHistory = history.filter { it.role != "system" }
+        // Break-armor calls retain one stable first reply plus the latest successful exchange.
+        // This avoids repeatedly resending long prior prose or failed sensitive requests.
+        val breakArmorAnchorMode = breakArmorSemanticLayerEnabled &&
+            conversationCharacter != null && !isGroupConversation
+        val requestHistory = if (breakArmorAnchorMode) {
+            selectBreakArmorAnchorHistory(contextHistory)
+        } else {
+            contextHistory
+        }
         val recentRoundLimit = (conversation?.contextLimit ?: 20).coerceIn(1, 120)
-        val splitIndex = splitIndexForRecentUserRounds(contextHistory.map { it.role }, recentRoundLimit)
-        val olderMessages = contextHistory.take(splitIndex)
+        val splitIndex = if (breakArmorAnchorMode) 0 else {
+            splitIndexForRecentUserRounds(requestHistory.map { it.role }, recentRoundLimit)
+        }
+        val olderMessages = requestHistory.take(splitIndex)
         val summaryCursor = conversation?.summaryUpToMessageId ?: 0L
-        val recentMessages = contextHistory.drop(splitIndex).filter { it.id > summaryCursor }
-        val singleCardTurnContext = conversationCharacter?.takeIf { !isGroupConversation }?.let {
+        val recentMessages = requestHistory.drop(splitIndex).filter {
+            breakArmorAnchorMode || it.id > summaryCursor
+        }
+        val singleCardTurnContext = conversationCharacter?.takeIf {
+            !isGroupConversation && !breakArmorAnchorMode
+        }?.let {
             buildSingleCardTurnContext(it, contextHistory, userText)
+        }.orEmpty()
+        val sceneContractLayer = conversationCharacter?.takeIf { !isGroupConversation }?.let { character ->
+            val profiles = parseSubCharacterProfiles(character.subCharactersJson)
+            val states = EnsembleSceneContract.resolveStates(conversation?.sceneRoleStatesJson.orEmpty(), profiles)
+            EnsembleSceneContract.buildPromptLayer(
+                states = states,
+                budget = EnsembleSceneContract.budget(maxOutputTokens, states)
+            )
         }.orEmpty()
 
         val characterAnchor = if (conversation?.characterId != null) {
@@ -265,6 +290,7 @@ class ChatMessageBuilder(
                 add("【世界信息】\n$it\n【世界信息结束】")
             }
             conversation?.historySummary?.trim()?.takeIf {
+                !breakArmorAnchorMode &&
                 it.isNotBlank() && (
                     historyUpToMessageId == null ||
                         (conversation.summaryUpToMessageId ?: 0L) <= historyUpToMessageId
@@ -276,10 +302,14 @@ class ChatMessageBuilder(
                         "$it\n【旧历史摘要结束】"
                 )
             }
-            buildContextSummary(uncoveredOlderMessages).takeIf { it.isNotBlank() }?.let(::add)
+            if (!breakArmorAnchorMode) {
+                buildContextSummary(uncoveredOlderMessages).takeIf { it.isNotBlank() }?.let(::add)
+            } else {
+                add("【破甲续写上下文】仅保留首个有效角色回复作为基调，以及最近一组成功互动。不要回收、复述或依据更早的用户原文；当前用户输入与保留回复共同决定续写。")
+            }
             characterAnchor?.takeIf { it.isNotBlank() }?.let(::add)
             conversation?.authorNote?.trim()?.takeIf { it.isNotBlank() }?.let {
-                add("【作者注释·本轮优先参考】\n$it\n【作者注释结束】")
+                add("【剧情前言·本轮优先参考】\n$it\n【剧情前言结束】")
             }
             if (characterCreativePresetEnabled) {
                 add(
@@ -292,6 +322,7 @@ class ChatMessageBuilder(
                 add(buildCreativePresetExecutionReminder(characterCreativePresetText))
             }
             singleCardTurnContext.takeIf { it.isNotBlank() }?.let(::add)
+            sceneContractLayer.takeIf { it.isNotBlank() }?.let(::add)
             if (breakArmorSemanticLayerEnabled) {
                 add(buildBreakArmorExecutionCore(userText, allowPersonaInfluence = false))
             }
@@ -921,4 +952,18 @@ class ChatMessageBuilder(
             return conversation.isGroupConversation()
         }
     }
+}
+
+internal fun selectBreakArmorAnchorHistory(history: List<ChatMessageEntity>): List<ChatMessageEntity> {
+    val canonical = history.filter { !it.isError && (it.role == "user" || it.role == "assistant") }
+    if (canonical.isEmpty()) return emptyList()
+    val firstUserIndex = canonical.indexOfFirst { it.role == "user" }
+    val anchor = canonical.drop((firstUserIndex + 1).coerceAtLeast(0))
+        .firstOrNull { it.role == "assistant" }
+        ?: canonical.firstOrNull { it.role == "assistant" }
+    val recent = canonical.takeLast(3)
+    return listOfNotNull(anchor)
+        .plus(recent)
+        .distinctBy { it.id }
+        .sortedWith(compareBy<ChatMessageEntity> { it.timestamp }.thenBy { it.id })
 }

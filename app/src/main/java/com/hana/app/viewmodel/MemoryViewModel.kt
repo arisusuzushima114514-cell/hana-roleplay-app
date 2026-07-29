@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class MemoryUiState(
     val items: List<MemoryEntryEntity> = emptyList(),
@@ -63,9 +65,11 @@ class MemoryViewModel(
     fun export(context: Context, uri: Uri) {
         viewModelScope.launch {
             runCatching {
-                val json = repository.exportMainMemoryJson()
-                context.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray(Charsets.UTF_8)) }
-                    ?: error("无法写入记忆文件")
+                withContext(Dispatchers.IO) {
+                    val json = repository.exportMainMemoryJson()
+                    context.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+                        ?: error("无法写入记忆文件")
+                }
             }.onSuccess {
                 _events.emit("主助手记忆已导出")
             }.onFailure {
@@ -77,9 +81,11 @@ class MemoryViewModel(
     fun import(context: Context, uri: Uri) {
         viewModelScope.launch {
             runCatching {
-                val json = context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                    ?: error("无法读取记忆文件")
-                repository.importMainMemoryJson(json)
+                withContext(Dispatchers.IO) {
+                    val json = context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+                        ?: error("无法读取记忆文件")
+                    repository.importMainMemoryJson(json)
+                }
             }.onSuccess {
                 _events.emit("已导入 $it 条主助手记忆")
             }.onFailure {

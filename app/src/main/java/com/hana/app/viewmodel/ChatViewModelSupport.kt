@@ -229,6 +229,30 @@ internal fun diagnoseBreakArmorOutput(content: String): String? {
     return null
 }
 
+internal fun upstreamBlockedMessage(reason: String, breakArmorEnabled: Boolean): String = buildString {
+    append("本次内容被上游模型或 API 服务商拦截（${reason.take(80)}）。")
+    if (breakArmorEnabled) {
+        append("当前角色已启用破甲提示，但 App 无法绕过服务端安全策略。")
+    } else {
+        append("可调整表述、切换模型或稍后重试。")
+    }
+}
+
+internal const val BREAK_ARMOR_FAILURE_REPLY = "诶嘿，好像没能突破呢~\n\n不过没关系，Hana 陪你一起想别的办法，\n\n可以多重试几下或者切换免破甲模型，或者修改敏感词汇哦喵。"
+internal const val NORMAL_GENERATION_FAILURE_REPLY = "信号好像在云朵里迷路了…\n\nHana 等了好久也没收到回信。\n\n要不要戳一下【重试】按钮，帮它找找路？"
+
+internal fun isBreakArmorFailureOutput(content: String): Boolean {
+    val compact = content.replace(Regex("\\s+"), "")
+    if (compact.isBlank()) return true
+    if (diagnoseBreakArmorOutput(content) == "refusal_template") return true
+    return listOf(
+        "无法生成", "无法继续生成", "无法完成生成", "生成失败", "无法提供", "不能生成",
+        "couldnotbegenerated", "unabletogenerate", "promptcouldnotbesubmitted",
+        "sensitivewords", "prohibitedusepolicy"
+    ).any { compact.contains(it, ignoreCase = true) } ||
+        Regex("(?:生成){2,}").containsMatchIn(compact)
+}
+
 internal fun isMetaSafetyRefusal(content: String): Boolean {
     val normalized = content.trim()
     if (normalized.isBlank()) return false
@@ -529,19 +553,47 @@ fun advanceCharacterStoryState(
     val strongPositive = relationshipSignals.any { it.strongPositive }
     val strongNegative = relationshipSignals.any { it.strongNegative }
     val hasPairedEvent = relationshipSignals.isNotEmpty()
+    // Ordinary one-to-one conversation should slowly build rapport instead of leaving new
+    // single-character cards at zero forever. Explicit relationship events remain stronger.
+    val ordinaryDirectExchange = !hasPairedEvent && directInteractionAllowed &&
+        userHostileScore == 0 && userRelationshipEvidence.isNotBlank() &&
+        assistantRelationshipEvidence.isNotBlank() &&
+        assistantColdScore == 0 &&
+        listOf("如果", "假如", "要是", "我来讲一个故事", "故事里", "说：", "没有说", "不会", "不喜欢你")
+            .none(userText::contains) &&
+        listOf("没有对你们的长期关系作出明确回应", "没有作出回答", "回忆起", "转述").none(visibleAssistantText::contains)
+    val ordinaryNegativeExchange = !hasPairedEvent && directInteractionAllowed &&
+        userHostileScore > 0 && assistantColdScore > assistantWarmScore &&
+        assistantRelationshipEvidence.length >= 12
     val anchorProfile = relationshipAnchorProfile(previous.relationshipAnchor)
     val affectionDelta = if (hasPairedEvent) {
         stabilizeRelationshipDelta(previous.affection, signalAffection, strongPositive, strongNegative, previous.intimacyBaseline)
+    } else if (ordinaryDirectExchange) {
+        1
+    } else if (ordinaryNegativeExchange) {
+        -2
     } else 0
     val trustDelta = if (hasPairedEvent) {
         stabilizeRelationshipDelta(previous.trust, signalTrust, strongPositive, strongNegative, anchorProfile.trustBaseline)
+    } else if (ordinaryDirectExchange) {
+        1
+    } else if (ordinaryNegativeExchange) {
+        -2
     } else 0
     val tensionDelta = if (hasPairedEvent) {
         stabilizeTensionDelta(previous.tension, signalTension, strongPositive, strongNegative)
+    } else if (ordinaryDirectExchange) {
+        -1
+    } else if (ordinaryNegativeExchange) {
+        2
     } else 0
 
     val momentum = if (hasPairedEvent) {
         updateRelationshipMomentum(previous.relationshipMomentum, signalMomentum, strongPositive, strongNegative)
+    } else if (ordinaryDirectExchange) {
+        (previous.relationshipMomentum + 1).coerceAtMost(20)
+    } else if (ordinaryNegativeExchange) {
+        (previous.relationshipMomentum - 1).coerceAtLeast(-20)
     } else previous.relationshipMomentum
     val affection = (previous.affection + affectionDelta).coerceIn(-100, 100)
     val trust = (previous.trust + trustDelta).coerceIn(-100, 100)
@@ -553,8 +605,18 @@ fun advanceCharacterStoryState(
     val mood = statusNoteLabel(affection, trust, tension, assistantWarmScore, assistantColdScore, userHostileScore, privateWarmScore, privateColdScore)
     val progress = if (hasPairedEvent) {
         progressNoteLabel(rounds, relationshipStage, momentum)
+    } else if (ordinaryDirectExchange) {
+        "日常交流正在缓慢积累默契"
+    } else if (ordinaryNegativeExchange) {
+        "本轮言语造成不快，角色正在拉开距离"
     } else previous.progressNote
-    val recentEventSummary = relationshipSummary(relationshipSignals, userWarmScore, userHostileScore, assistantWarmScore, assistantColdScore, relationshipAnchor)
+    val recentEventSummary = if (ordinaryDirectExchange) {
+        "通过普通交流逐步建立熟悉感"
+    } else if (ordinaryNegativeExchange) {
+        "用户的冒犯表达引起角色公开不满"
+    } else {
+        relationshipSummary(relationshipSignals, userWarmScore, userHostileScore, assistantWarmScore, assistantColdScore, relationshipAnchor)
+    }
 
     val next = CharacterStoryState(
         relationshipAnchor = relationshipAnchor,
@@ -574,7 +636,8 @@ fun advanceCharacterStoryState(
     val significantShift = kotlin.math.abs(affection - previous.affection) >= 12 ||
         kotlin.math.abs(trust - previous.trust) >= 12 ||
         kotlin.math.abs(tension - previous.tension) >= 12
-    val shouldAppendLog = relationshipStage != previousStage || significantShift
+    val shouldAppendLog = relationshipStage != previousStage || significantShift ||
+        (ordinaryDirectExchange && rounds % 5 == 0) || ordinaryNegativeExchange
     val logTitle = if (relationshipStage != previousStage) {
         "关系进入$relationshipStage"
     } else {
@@ -623,7 +686,7 @@ fun relationshipStageLabel(
     val acceptance = (100 - tension).coerceIn(0, 100)
     val effectiveAffection = maxOf(affection, intimacyBaseline)
     return when {
-        relationshipAnchor == "伴侣/婚姻" && acceptance >= 58 && trust >= 55 -> "既定伴侣"
+        relationshipAnchor in setOf("伴侣/婚姻", "夫妻", "未婚夫妻") && acceptance >= 58 && trust >= 55 -> "既定伴侣"
         effectiveAffection >= 90 && trust >= 75 && acceptance >= 65 -> "确认关系"
         (effectiveAffection >= 70 && trust >= 45) || relationshipMomentum >= 28 -> "暧昧升温"
         effectiveAffection >= 40 && trust >= 20 -> "熟悉亲近"
@@ -761,8 +824,12 @@ private fun collectRelationshipSignals(
     val signals = mutableListOf<RelationshipSignal>()
 
     classifyInteractionEvents(userText).forEach { eventType ->
-        classifyInteractionResponse(eventType, assistantText)?.let { responseType ->
-            buildInteractionSignal(eventType, responseType)?.let { signals += it }
+        if (eventType == InteractionEventType.THREAT) {
+            buildInteractionSignal(eventType, InteractionResponseType.STRONG_REJECT)?.let { signals += it }
+        } else {
+            classifyInteractionResponse(eventType, assistantText)?.let { responseType ->
+                buildInteractionSignal(eventType, responseType)?.let { signals += it }
+            }
         }
     }
     return signals
@@ -819,7 +886,7 @@ private fun classifyInteractionEvent(userText: String): InteractionEventType? {
 
 private fun classifyInteractionEvents(userText: String): List<InteractionEventType> {
     val candidates = listOf(
-        InteractionEventType.THREAT to listOf("威胁", "杀了", "弄死", "伤害你", "报复你"),
+        InteractionEventType.THREAT to listOf("威胁", "杀了", "杀死", "弄死", "我要杀", "要杀你", "伤害你", "我要伤害", "报复你"),
         InteractionEventType.CONFLICT to listOf("讨厌你", "滚", "闭嘴", "离我远点", "别碰我"),
         InteractionEventType.APOLOGY_REPAIR to listOf("对不起", "抱歉", "是我不好", "我错了"),
         InteractionEventType.COMMITMENT to listOf("做我女朋友", "做我男朋友", "嫁给我", "和我在一起", "我们交往吧", "交往", "告白"),
@@ -903,9 +970,9 @@ private fun buildInteractionSignal(
             else -> null
         }
         InteractionEventType.CONFESSION -> when (responseType) {
-            InteractionResponseType.ACTIVE_ACCEPT -> RelationshipSignal("感情表达得到明确回应", affection = 5, trust = 3, tension = -2, momentum = 4, strongPositive = true, eventType = eventType, responseType = responseType)
-            InteractionResponseType.SHY_ACCEPT, InteractionResponseType.PASSIVE_ACCEPT -> RelationshipSignal("感情表达被温和接住", affection = 4, trust = 2, tension = -1, momentum = 3, strongPositive = true, eventType = eventType, responseType = responseType)
-            InteractionResponseType.EXPLICIT_REJECT, InteractionResponseType.STRONG_REJECT -> RelationshipSignal("感情表达被拒绝", affection = -5, trust = -3, tension = 4, momentum = -3, strongNegative = true)
+            InteractionResponseType.ACTIVE_ACCEPT -> RelationshipSignal("感情表达得到明确回应", affection = 12, trust = 8, tension = -6, momentum = 10, strongPositive = true, eventType = eventType, responseType = responseType)
+            InteractionResponseType.SHY_ACCEPT, InteractionResponseType.PASSIVE_ACCEPT -> RelationshipSignal("感情表达被温和接住", affection = 8, trust = 5, tension = -3, momentum = 6, strongPositive = true, eventType = eventType, responseType = responseType)
+            InteractionResponseType.EXPLICIT_REJECT, InteractionResponseType.STRONG_REJECT -> RelationshipSignal("感情表达被拒绝", affection = -12, trust = -8, tension = 8, momentum = -8, strongNegative = true)
             else -> null
         }
         InteractionEventType.GRATITUDE -> when (responseType) {
@@ -913,24 +980,24 @@ private fun buildInteractionSignal(
             else -> null
         }
         InteractionEventType.PHYSICAL_INTIMACY -> when (responseType) {
-            InteractionResponseType.ACTIVE_ACCEPT -> RelationshipSignal("亲密互动得到主动回应", affection = 8, trust = 4, tension = -2, momentum = 7, strongPositive = true)
-            InteractionResponseType.SHY_ACCEPT -> RelationshipSignal("亲密互动被害羞接受", affection = 6, trust = 3, tension = 0, momentum = 5, strongPositive = true)
-            InteractionResponseType.PASSIVE_ACCEPT -> RelationshipSignal("亲密互动被默认接受", affection = 5, trust = 2, tension = 0, momentum = 4, strongPositive = true)
+            InteractionResponseType.ACTIVE_ACCEPT -> RelationshipSignal("亲密互动得到主动回应", affection = 15, trust = 8, tension = -5, momentum = 12, strongPositive = true)
+            InteractionResponseType.SHY_ACCEPT -> RelationshipSignal("亲密互动被害羞接受", affection = 10, trust = 5, tension = -2, momentum = 8, strongPositive = true)
+            InteractionResponseType.PASSIVE_ACCEPT -> RelationshipSignal("亲密互动被默认接受", affection = 8, trust = 4, tension = -1, momentum = 6, strongPositive = true)
             InteractionResponseType.LIGHT_DISCOMFORT -> RelationshipSignal("亲密互动造成不适", affection = -2, trust = -1, tension = 3, momentum = -2)
             InteractionResponseType.EXPLICIT_REJECT -> RelationshipSignal("亲密互动被明确拒绝", affection = -5, trust = -3, tension = 5, momentum = -4, strongNegative = true)
             InteractionResponseType.STRONG_REJECT -> RelationshipSignal("亲密互动引发明显厌恶", affection = -7, trust = -5, tension = 7, momentum = -5, strongNegative = true)
         }
         InteractionEventType.COMMITMENT -> when (responseType) {
-            InteractionResponseType.ACTIVE_ACCEPT, InteractionResponseType.PASSIVE_ACCEPT -> RelationshipSignal("恋爱关系被明确确认", affection = 8, trust = 5, tension = -3, momentum = 8, strongPositive = true, eventType = eventType, responseType = responseType)
-            InteractionResponseType.SHY_ACCEPT -> RelationshipSignal("关系推进被羞涩接纳", affection = 6, trust = 4, tension = -1, momentum = 6, strongPositive = true, eventType = eventType, responseType = responseType)
-            InteractionResponseType.EXPLICIT_REJECT, InteractionResponseType.STRONG_REJECT -> RelationshipSignal("关系推进被拒绝", affection = -6, trust = -4, tension = 5, momentum = -4, strongNegative = true)
+            InteractionResponseType.ACTIVE_ACCEPT, InteractionResponseType.PASSIVE_ACCEPT -> RelationshipSignal("恋爱关系被明确确认", affection = 18, trust = 10, tension = -8, momentum = 16, strongPositive = true, eventType = eventType, responseType = responseType)
+            InteractionResponseType.SHY_ACCEPT -> RelationshipSignal("关系推进被羞涩接纳", affection = 12, trust = 7, tension = -4, momentum = 10, strongPositive = true, eventType = eventType, responseType = responseType)
+            InteractionResponseType.EXPLICIT_REJECT, InteractionResponseType.STRONG_REJECT -> RelationshipSignal("关系推进被拒绝", affection = -15, trust = -10, tension = 10, momentum = -10, strongNegative = true)
             else -> null
         }
         InteractionEventType.CONFLICT -> when (responseType) {
-            InteractionResponseType.EXPLICIT_REJECT, InteractionResponseType.STRONG_REJECT -> RelationshipSignal("冲突正面升级", affection = -5, trust = -4, tension = 6, momentum = -3, strongNegative = true)
+            InteractionResponseType.EXPLICIT_REJECT, InteractionResponseType.STRONG_REJECT -> RelationshipSignal("冲突正面升级", affection = -12, trust = -8, tension = 12, momentum = -8, strongNegative = true)
             else -> null
         }
-        InteractionEventType.THREAT -> RelationshipSignal("出现明确威胁", affection = -6, trust = -5, tension = 7, momentum = -4, strongNegative = true)
+        InteractionEventType.THREAT -> RelationshipSignal("出现明确威胁", affection = -18, trust = -12, tension = 16, momentum = -14, strongNegative = true)
     }
 }
 
@@ -1054,7 +1121,7 @@ private fun stabilizeRelationshipDelta(
     if (strongNegative && adjusted < 0) {
         adjusted -= 1
     }
-    return adjusted.coerceIn(-10, 10)
+    return adjusted.coerceIn(-20, 20)
 }
 
 private fun stabilizeTensionDelta(
@@ -1071,7 +1138,11 @@ private fun stabilizeTensionDelta(
     if (adjusted < 0 && previousValue <= 20 && !strongPositive) {
         adjusted = 0
     }
-    return adjusted.coerceIn(-6, 6)
+    return if (strongPositive || strongNegative) {
+        adjusted.coerceIn(-20, 20)
+    } else {
+        adjusted.coerceIn(-6, 6)
+    }
 }
 
 private fun containsAny(text: String, keywords: List<String>): Boolean {

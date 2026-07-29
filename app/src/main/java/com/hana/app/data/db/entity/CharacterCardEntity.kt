@@ -20,5 +20,6 @@ data class CharacterCardEntity(
     val lastMessageAt: Long = 0L,
     val lastMessagePreview: String = "",
     val characterMode: String = CHARACTER_MODE_SINGLE,
-    val subCharactersJson: String = EMPTY_SUB_CHARACTERS_JSON
+    val subCharactersJson: String = EMPTY_SUB_CHARACTERS_JSON,
+    val defaultStoryPreface: String = ""
 )

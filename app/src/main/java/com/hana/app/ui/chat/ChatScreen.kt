@@ -23,6 +23,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -168,7 +169,7 @@ fun ChatScreen(
     onPersistCameraAttachment: (Bitmap, (ChatAttachment?) -> Unit) -> Unit = { _, _ -> },
     onSaveAttachmentImage: (String) -> Unit = {},
     onStopGeneration: () -> Unit,
-    onRetryLastUserMessage: () -> Unit,
+    onRetryFailedMessage: (ChatMessageEntity) -> Unit,
     onUpdateConversationParameters: (String?, Float, Float, Int, Int, String?) -> Unit,
     onUpdateSystemPrompt: (String, String?) -> Unit,
     onToggleWebSearch: () -> Unit,
@@ -209,6 +210,8 @@ fun ChatScreen(
         }
     }
     val bottomAnchorIndex = maxOf(0, displayMessages.size - 1)
+    val latestDisplayMessageCount by rememberUpdatedState(displayMessages.size)
+    val latestBottomAnchorIndex by rememberUpdatedState(bottomAnchorIndex)
     val density = LocalDensity.current
     val bottomContentPadding = with(density) { inputBarHeightPx.toDp() } + 24.dp
     val chatDisplay = LocalHanaChatDisplaySettings.current
@@ -244,8 +247,8 @@ fun ChatScreen(
     // 外部触发滚动
     LaunchedEffect(Unit) {
         onScrollTrigger?.collect {
-            if (displayMessages.isNotEmpty()) {
-                listState.animateScrollToItem(bottomAnchorIndex)
+            if (latestDisplayMessageCount > 0) {
+                listState.animateScrollToItem(latestBottomAnchorIndex)
             }
         }
     }
@@ -321,7 +324,8 @@ fun ChatScreen(
                             onEditMessageToInput = onEditMessageToInput,
                             onRetryFromMessage = onRetryFromMessage,
                             onSaveAttachmentImage = onSaveAttachmentImage,
-                            onRetryLastUserMessage = onRetryLastUserMessage,
+                            onRetryFailedMessage = onRetryFailedMessage,
+                            allowRegenerate = currentConversation?.isGroupConversation() != true,
                             onToggleFavorite = onToggleFavorite,
                             speakerAvatarUrl = message.speakerCharacterId?.let(characterAvatarById::get),
                             showInnerThoughtEntry = showInnerThoughtEntry,
@@ -528,7 +532,8 @@ private fun MessageBubble(
     onEditMessageToInput: (ChatMessageEntity) -> Unit,
     onRetryFromMessage: (ChatMessageEntity) -> Unit,
     onSaveAttachmentImage: (String) -> Unit,
-    onRetryLastUserMessage: () -> Unit,
+    onRetryFailedMessage: (ChatMessageEntity) -> Unit,
+    allowRegenerate: Boolean,
     onToggleFavorite: (ChatMessageEntity) -> Unit,
     speakerAvatarUrl: String?,
     showInnerThoughtEntry: Boolean,
@@ -767,7 +772,7 @@ private fun MessageBubble(
                             )
                         }
                         if (message.isError) {
-                            TextButton(onClick = onRetryLastUserMessage, modifier = Modifier.align(Alignment.End)) {
+                            TextButton(onClick = { onRetryFailedMessage(message) }, modifier = Modifier.align(Alignment.End)) {
                                 Text("重试")
                             }
                         }
@@ -806,7 +811,7 @@ private fun MessageBubble(
                             scope.launch { snackbarHostState.showSnackbar(copiedMessage) }
                         }
                     )
-                    if (!isUser) {
+                    if (!isUser && allowRegenerate) {
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.regenerate)) },
                             onClick = {

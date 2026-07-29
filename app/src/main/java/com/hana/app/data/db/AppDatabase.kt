@@ -27,7 +27,7 @@ import com.hana.app.data.db.entity.SavedModelEntity
         com.hana.app.data.db.entity.CachedModelEntity::class,
         MemoryEntryEntity::class
     ],
-    version = 16,
+    version = 21,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -69,7 +69,12 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_12_13,
                     MIGRATION_13_14,
                     MIGRATION_14_15,
-                    MIGRATION_15_16
+                    MIGRATION_15_16,
+                    MIGRATION_16_17,
+                    MIGRATION_17_18,
+                    MIGRATION_18_19,
+                    MIGRATION_19_20,
+                    MIGRATION_20_21
                 )
                 .addCallback(object : Callback() {
                     override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
@@ -144,6 +149,73 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_16_17 = object : androidx.room.migration.Migration(16, 17) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                addColumnIfMissing(db, "conversations", "sceneRoleStatesJson", "TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        private val MIGRATION_17_18 = object : androidx.room.migration.Migration(17, 18) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                addColumnIfMissing(db, "conversations", "ensembleCoverageJson", "TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        private val MIGRATION_18_19 = object : androidx.room.migration.Migration(18, 19) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                // Version 19 is a compatibility checkpoint for databases created by the
+                // previously shipped build. Keep every known conversation field intact.
+                ensureCompatibleSchema(db)
+            }
+        }
+
+        private val MIGRATION_19_20 = object : androidx.room.migration.Migration(19, 20) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                // A shipped v19 build kept a legacy userAvatarUrl column. Room validates an
+                // exact table shape, so rebuild just this independent table and retain its data.
+                db.execSQL("ALTER TABLE character_cards RENAME TO character_cards_legacy_v19")
+                db.execSQL("""
+                    CREATE TABLE character_cards (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        avatarUrl TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        greeting TEXT NOT NULL,
+                        userPersona TEXT NOT NULL,
+                        tags TEXT NOT NULL,
+                        modelId TEXT NOT NULL,
+                        temperature REAL NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        lastMessageAt INTEGER NOT NULL,
+                        lastMessagePreview TEXT NOT NULL,
+                        characterMode TEXT NOT NULL,
+                        subCharactersJson TEXT NOT NULL
+                    )
+                """.trimIndent())
+                db.execSQL("""
+                    INSERT INTO character_cards (
+                        id, name, avatarUrl, description, greeting, userPersona, tags, modelId,
+                        temperature, createdAt, updatedAt, lastMessageAt, lastMessagePreview,
+                        characterMode, subCharactersJson
+                    )
+                    SELECT
+                        id, name, avatarUrl, description, greeting, userPersona, tags, modelId,
+                        temperature, createdAt, updatedAt, lastMessageAt, lastMessagePreview,
+                        characterMode, subCharactersJson
+                    FROM character_cards_legacy_v19
+                """.trimIndent())
+                db.execSQL("DROP TABLE character_cards_legacy_v19")
+                ensureCompatibleSchema(db)
+            }
+        }
+
+        private val MIGRATION_20_21 = object : androidx.room.migration.Migration(20, 21) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                addColumnIfMissing(db, "character_cards", "defaultStoryPreface", "TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         private fun compatibilityMigration(from: Int, to: Int) = object : androidx.room.migration.Migration(from, to) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 ensureCompatibleSchema(db)
@@ -169,6 +241,7 @@ abstract class AppDatabase : RoomDatabase() {
             addColumnIfMissing(db, "character_cards", "lastMessagePreview", "TEXT NOT NULL DEFAULT ''")
             addColumnIfMissing(db, "character_cards", "characterMode", "TEXT NOT NULL DEFAULT 'single'")
             addColumnIfMissing(db, "character_cards", "subCharactersJson", "TEXT NOT NULL DEFAULT '{\"version\":1,\"profiles\":[]}'")
+            addColumnIfMissing(db, "character_cards", "defaultStoryPreface", "TEXT NOT NULL DEFAULT ''")
 
             db.execSQL("""
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -178,7 +251,7 @@ abstract class AppDatabase : RoomDatabase() {
                     modelName TEXT, temperature REAL NOT NULL DEFAULT 0.7, topP REAL NOT NULL DEFAULT 1.0,
                     maxTokens INTEGER NOT NULL DEFAULT 8192, contextLimit INTEGER NOT NULL DEFAULT 36,
                      systemPrompt TEXT, historySummary TEXT, authorNote TEXT, worldInfo TEXT,
-                     groupScene TEXT, groupSceneLocked INTEGER NOT NULL DEFAULT 0,
+                      groupScene TEXT, groupSceneLocked INTEGER NOT NULL DEFAULT 0, sceneRoleStatesJson TEXT NOT NULL DEFAULT '', ensembleCoverageJson TEXT NOT NULL DEFAULT '',
                     summaryUpToMessageId INTEGER, totalTokens INTEGER NOT NULL DEFAULT 0, isPinned INTEGER NOT NULL DEFAULT 0,
                     isFavorite INTEGER NOT NULL DEFAULT 0
                 )
@@ -201,6 +274,8 @@ abstract class AppDatabase : RoomDatabase() {
             addColumnIfMissing(db, "conversations", "worldInfo", "TEXT")
             addColumnIfMissing(db, "conversations", "groupScene", "TEXT")
             addColumnIfMissing(db, "conversations", "groupSceneLocked", "INTEGER NOT NULL DEFAULT 0")
+            addColumnIfMissing(db, "conversations", "sceneRoleStatesJson", "TEXT NOT NULL DEFAULT ''")
+            addColumnIfMissing(db, "conversations", "ensembleCoverageJson", "TEXT NOT NULL DEFAULT ''")
             addColumnIfMissing(db, "conversations", "summaryUpToMessageId", "INTEGER")
             addColumnIfMissing(db, "conversations", "totalTokens", "INTEGER NOT NULL DEFAULT 0")
             addColumnIfMissing(db, "conversations", "isPinned", "INTEGER NOT NULL DEFAULT 0")

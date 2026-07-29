@@ -2,6 +2,7 @@ package com.hana.app.data.repository
 
 import com.hana.app.data.db.dao.SavedModelDao
 import com.hana.app.data.db.entity.SavedModelEntity
+import com.hana.app.data.settings.normalizeApiBaseUrl
 import kotlinx.coroutines.flow.Flow
 
 class ModelRepository(
@@ -16,17 +17,18 @@ class ModelRepository(
     suspend fun getById(id: Long): SavedModelEntity? = dao.getById(id)
 
     suspend fun save(model: SavedModelEntity): Long {
-        return if (model.id == 0L) {
-            dao.insert(model)
+        val normalized = model.copy(baseUrl = normalizeApiBaseUrl(model.baseUrl))
+        return if (normalized.id == 0L) {
+            dao.insert(normalized)
         } else {
-            val current = dao.getById(model.id)
+            val current = dao.getById(normalized.id)
             dao.update(
-                model.copy(
-                    createdAt = current?.createdAt ?: model.createdAt,
-                    isActive = current?.isActive ?: model.isActive
+                normalized.copy(
+                    createdAt = current?.createdAt ?: normalized.createdAt,
+                    isActive = current?.isActive ?: normalized.isActive
                 )
             )
-            model.id
+            normalized.id
         }
     }
 
@@ -48,7 +50,7 @@ class ModelRepository(
 
     suspend fun findDuplicate(baseUrl: String, apiKey: String): SavedModelEntity? {
         return dao.getAll().firstOrNull {
-            it.baseUrl == baseUrl.trim().trimEnd('/') && it.apiKey == apiKey.trim()
+            it.baseUrl == normalizeApiBaseUrl(baseUrl) && it.apiKey == apiKey.trim()
         }
     }
 }

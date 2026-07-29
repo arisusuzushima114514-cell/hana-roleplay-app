@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 data class SettingsUiState(
@@ -78,6 +80,35 @@ class SettingsViewModel(
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
     val language = repository.languageFlow
     private val providerModelsCache = mutableMapOf<Long, List<String>>()
+    private val pendingTextDrafts = mutableMapOf<String, String>()
+    private val pendingCharacterPresetDrafts = mutableMapOf<String, String>()
+    private var baseUrlNormalizationJob: Job? = null
+
+    private fun resolvedTextDraft(key: String, persisted: String): String {
+        val draft = pendingTextDrafts[key] ?: return persisted
+        return if (draft == persisted) {
+            pendingTextDrafts.remove(key)
+            persisted
+        } else {
+            draft
+        }
+    }
+
+    private fun resolvedCharacterPresetDrafts(persisted: Map<String, String>): Map<String, String> {
+        val resolved = persisted.toMutableMap()
+        val confirmed = pendingCharacterPresetDrafts.filter { (characterId, draft) ->
+            persisted[characterId] == draft
+        }.keys
+        confirmed.forEach(pendingCharacterPresetDrafts::remove)
+        pendingCharacterPresetDrafts.forEach { (characterId, draft) ->
+            if (persisted[characterId] == draft) {
+                return@forEach
+            } else {
+                resolved[characterId] = draft
+            }
+        }
+        return resolved
+    }
 
     init {
         viewModelScope.launch {
@@ -87,19 +118,19 @@ class SettingsViewModel(
                 } else null
                 _uiState.update {
                     it.copy(
-                        apiBaseUrl = settings.apiBaseUrl,
-                        apiKey = settings.apiKey,
-                        selectedModel = settings.selectedModel,
+                        apiBaseUrl = resolvedTextDraft("apiBaseUrl", settings.apiBaseUrl),
+                        apiKey = resolvedTextDraft("apiKey", settings.apiKey),
+                        selectedModel = resolvedTextDraft("selectedModel", settings.selectedModel),
                         language = settings.language,
                         timeoutSeconds = settings.timeoutSeconds,
                         historicalTokens = settings.historicalTokens,
-                        quickPhrasesText = settings.quickPhrases.joinToString("\n"),
-                        visionBaseUrl = settings.visionBaseUrl,
-                        visionApiKey = settings.visionApiKey,
-                        visionModelName = settings.visionModelName,
-                        summaryBaseUrl = settings.summaryBaseUrl,
-                        summaryApiKey = settings.summaryApiKey,
-                        summaryModelName = settings.summaryModelName,
+                        quickPhrasesText = resolvedTextDraft("quickPhrases", settings.quickPhrases.joinToString("\n")),
+                        visionBaseUrl = resolvedTextDraft("visionBaseUrl", settings.visionBaseUrl),
+                        visionApiKey = resolvedTextDraft("visionApiKey", settings.visionApiKey),
+                        visionModelName = resolvedTextDraft("visionModelName", settings.visionModelName),
+                        summaryBaseUrl = resolvedTextDraft("summaryBaseUrl", settings.summaryBaseUrl),
+                        summaryApiKey = resolvedTextDraft("summaryApiKey", settings.summaryApiKey),
+                        summaryModelName = resolvedTextDraft("summaryModelName", settings.summaryModelName),
                         autoSummaryThreshold = settings.autoSummaryThreshold,
                         supportsImage = settings.supportsImage,
                         supportsFile = settings.supportsFile,
@@ -108,21 +139,21 @@ class SettingsViewModel(
                         voiceInputEnabled = settings.voiceInputEnabled,
                         streamEnabled = settings.streamEnabled,
                         searchIndependentMode = settings.searchIndependentMode,
-                        searchProviderUrl = settings.searchProviderUrl,
-                        searchProviderKey = settings.searchProviderKey,
+                        searchProviderUrl = resolvedTextDraft("searchProviderUrl", settings.searchProviderUrl),
+                        searchProviderKey = resolvedTextDraft("searchProviderKey", settings.searchProviderKey),
                         personaEnabled = settings.personaEnabled,
-                        personaPrompt = settings.personaPrompt,
+                        personaPrompt = resolvedTextDraft("personaPrompt", settings.personaPrompt),
                         webSearchEnabled = settings.webSearchEnabled,
-                        creativePresetText = settings.creativePresetText,
+                        creativePresetText = resolvedTextDraft("creativePresetText", settings.creativePresetText),
                         characterCreativePresetEnabled = settings.characterCreativePresetEnabled,
                         characterCreativePresetAffectsPersona = settings.characterCreativePresetAffectsPersona,
-                        characterCreativePresetTexts = settings.characterCreativePresetTexts,
+                        characterCreativePresetTexts = resolvedCharacterPresetDrafts(settings.characterCreativePresetTexts),
                         characterIndependentCreativePresetEnabled = settings.characterIndependentCreativePresetEnabled,
                         characterIndependentCreativePresetAffectsPersona = settings.characterIndependentCreativePresetAffectsPersona,
                         autoThemeSuggestionEnabled = settings.autoThemeSuggestionEnabled,
                         lastAutoThemeSuggestionTag = settings.lastAutoThemeSuggestionTag,
                         imageProviderId = settings.imageProviderId,
-                        imageModelName = settings.imageModelName,
+                        imageModelName = resolvedTextDraft("imageModelName", settings.imageModelName),
                         backgroundIntensity = settings.backgroundIntensity,
                         activeImageProviderName = imageProvider?.name.orEmpty()
                     )
@@ -144,16 +175,29 @@ class SettingsViewModel(
     }
 
     fun onBaseUrlChange(value: String) {
+        pendingTextDrafts["apiBaseUrl"] = value
         _uiState.update { it.copy(apiBaseUrl = value) }
         viewModelScope.launch { repository.saveBaseUrl(value) }
+        baseUrlNormalizationJob?.cancel()
+        baseUrlNormalizationJob = viewModelScope.launch {
+            delay(700L)
+            val normalized = com.hana.app.data.settings.normalizeApiBaseUrl(value)
+            if (normalized != value.trim()) {
+                pendingTextDrafts["apiBaseUrl"] = normalized
+                _uiState.update { it.copy(apiBaseUrl = normalized) }
+                repository.saveBaseUrl(normalized)
+            }
+        }
     }
 
     fun onApiKeyChange(value: String) {
+        pendingTextDrafts["apiKey"] = value
         _uiState.update { it.copy(apiKey = value) }
         viewModelScope.launch { repository.saveApiKey(value) }
     }
 
     fun onSelectedModelChange(value: String) {
+        pendingTextDrafts["selectedModel"] = value
         _uiState.update { it.copy(selectedModel = value) }
         viewModelScope.launch { repository.saveSelectedModel(value) }
     }
@@ -185,11 +229,14 @@ class SettingsViewModel(
     }
 
     fun saveSearchSettings(url: String, key: String, mode: Boolean) {
+        pendingTextDrafts["searchProviderUrl"] = url
+        pendingTextDrafts["searchProviderKey"] = key
         _uiState.update { it.copy(searchProviderUrl = url, searchProviderKey = key, searchIndependentMode = mode) }
         viewModelScope.launch { repository.saveSearchSettings(url, key, mode) }
     }
 
     fun savePersonaSettings(enabled: Boolean, prompt: String) {
+        pendingTextDrafts["personaPrompt"] = prompt
         _uiState.update { it.copy(personaEnabled = enabled, personaPrompt = prompt) }
         viewModelScope.launch { repository.savePersonaSettings(enabled, prompt) }
     }
@@ -218,11 +265,13 @@ class SettingsViewModel(
     }
 
     fun onCreativePresetTextChange(value: String) {
+        pendingTextDrafts["creativePresetText"] = value
         _uiState.update { it.copy(creativePresetText = value) }
         viewModelScope.launch { repository.saveCreativePresetText(value) }
     }
 
     fun onCharacterCreativePresetTextChange(characterId: String, value: String) {
+        pendingCharacterPresetDrafts[characterId] = value
         _uiState.update {
             it.copy(characterCreativePresetTexts = it.characterCreativePresetTexts.toMutableMap().apply {
                 put(characterId, value)
@@ -264,6 +313,7 @@ class SettingsViewModel(
     }
 
     fun onImageModelNameChange(modelName: String) {
+        pendingTextDrafts["imageModelName"] = modelName
         _uiState.update { it.copy(imageModelName = modelName) }
         viewModelScope.launch { repository.saveImageModelName(modelName) }
     }
@@ -280,6 +330,7 @@ class SettingsViewModel(
     }
 
     fun onQuickPhrasesChange(value: String) {
+        pendingTextDrafts["quickPhrases"] = value
         _uiState.update { it.copy(quickPhrasesText = value) }
         viewModelScope.launch {
             repository.saveQuickPhrases(value.lines())
@@ -287,31 +338,37 @@ class SettingsViewModel(
     }
 
     fun onVisionBaseUrlChange(value: String) {
+        pendingTextDrafts["visionBaseUrl"] = value
         _uiState.update { it.copy(visionBaseUrl = value) }
         saveVisionSettings()
     }
 
     fun onVisionApiKeyChange(value: String) {
+        pendingTextDrafts["visionApiKey"] = value
         _uiState.update { it.copy(visionApiKey = value) }
         saveVisionSettings()
     }
 
     fun onVisionModelNameChange(value: String) {
+        pendingTextDrafts["visionModelName"] = value
         _uiState.update { it.copy(visionModelName = value) }
         saveVisionSettings()
     }
 
     fun onSummaryBaseUrlChange(value: String) {
+        pendingTextDrafts["summaryBaseUrl"] = value
         _uiState.update { it.copy(summaryBaseUrl = value) }
         saveSummarySettings()
     }
 
     fun onSummaryApiKeyChange(value: String) {
+        pendingTextDrafts["summaryApiKey"] = value
         _uiState.update { it.copy(summaryApiKey = value) }
         saveSummarySettings()
     }
 
     fun onSummaryModelNameChange(value: String) {
+        pendingTextDrafts["summaryModelName"] = value
         _uiState.update { it.copy(summaryModelName = value) }
         saveSummarySettings()
     }

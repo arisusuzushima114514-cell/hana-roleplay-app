@@ -18,6 +18,7 @@ import com.hana.app.data.api.models.UpstreamContentBlockedException
 import com.hana.app.data.db.entity.CharacterCardEntity
 import com.hana.app.data.db.entity.ChatMessageEntity
 import com.hana.app.data.db.entity.ConversationEntity
+import com.hana.app.data.db.entity.subCharacters
 import com.hana.app.data.db.entity.isMainChatConversation
 import com.hana.app.data.db.entity.isGroupConversation
 import com.hana.app.data.db.entity.SavedModelEntity
@@ -92,6 +93,8 @@ data class StreamingAssistantState(
 @androidx.compose.runtime.Stable
 data class PromptPreviewState(
     val messages: List<PromptPreviewMessage> = emptyList(),
+    val ensembleStates: List<SceneRoleState> = emptyList(),
+    val ensembleCoverage: EnsembleCoverageDiagnostic? = null,
     val isLoading: Boolean = false,
     val error: String? = null
 )
@@ -430,7 +433,7 @@ class ChatViewModel(
                         performWebSearch(lastUserText, searchSettings.searchProviderUrl, searchSettings.searchProviderKey)
                     } else null
                 } else null
-                messageBuilder.buildApiMessages(
+                val messages = messageBuilder.buildApiMessages(
                     conversationId = conversationId,
                     userText = lastUserText,
                     effectiveModel = effectiveModel,
@@ -463,15 +466,35 @@ class ChatViewModel(
                     groupViewerCharacterId = character?.id?.takeIf { participants.isNotEmpty() },
                     maxOutputTokens = conversation.maxTokens
                 )
-            }.onSuccess(::publishPromptPreview)
+                val card = conversation.characterId?.let { characterRepository.getById(it) }
+                val states = card?.let {
+                    EnsembleSceneContract.resolveStates(
+                        conversation.sceneRoleStatesJson,
+                        com.hana.app.data.db.entity.parseSubCharacterProfiles(it.subCharactersJson)
+                    )
+                }.orEmpty()
+                PromptPreviewState(
+                    messages = messageBuilder.buildPromptPreview(messages),
+                    ensembleStates = states,
+                    ensembleCoverage = EnsembleSceneContract.parseDiagnostic(conversation.ensembleCoverageJson)
+                )
+            }.onSuccess { preview -> _promptPreviewState.value = preview }
                 .onFailure { error ->
                     _promptPreviewState.value = PromptPreviewState(error = error.message ?: "预览生成失败")
                 }
         }
     }
 
-    private fun publishPromptPreview(messages: List<ApiService.ChatPayload>) {
-        _promptPreviewState.value = PromptPreviewState(messages = messageBuilder.buildPromptPreview(messages))
+    private fun publishPromptPreview(
+        messages: List<ApiService.ChatPayload>,
+        ensembleStates: List<SceneRoleState> = emptyList(),
+        ensembleCoverage: EnsembleCoverageDiagnostic? = null
+    ) {
+        _promptPreviewState.value = PromptPreviewState(
+            messages = messageBuilder.buildPromptPreview(messages),
+            ensembleStates = ensembleStates,
+            ensembleCoverage = ensembleCoverage
+        )
     }
 
     fun returnToMainConversation() {
@@ -621,11 +644,19 @@ class ChatViewModel(
     }
 
     fun importCharacterCard(context: Context, uri: Uri, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
-        viewModelScope.launch {
-            runCatching {
-                val bytes = context.contentResolver.openInputStream(uri)
-                    ?.use { it.readBytes() }
-                    ?: error("无法读取所选文件")
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
+                    val output = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        require(output.size() + count <= 20 * 1024 * 1024) { "角色卡文件不能超过 20 MB" }
+                        output.write(buffer, 0, count)
+                    }
+                    output.toByteArray()
+                } ?: error("无法读取所选文件")
                 val imported = characterRepository.importCharacterCard(bytes)
                 var character = imported.character
                 imported.embeddedAvatarBytes?.let { avatarBytes ->
@@ -637,8 +668,11 @@ class ChatViewModel(
                     require(characterRepository.save(character)) { "角色卡已解析，但头像保存失败" }
                 }
                 character.name
-            }.onSuccess { onResult(true, "已导入角色卡：$it") }
-                .onFailure { onResult(false, it.message.orEmpty()) }
+            }
+            withContext(Dispatchers.Main) {
+                result.onSuccess { onResult(true, "已导入角色卡：$it") }
+                    .onFailure { onResult(false, it.message.orEmpty()) }
+            }
         }
     }
 
@@ -789,7 +823,7 @@ class ChatViewModel(
                 val payload = buildExportPayload()
                 context.contentResolver.openOutputStream(uri)?.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
                     ?: error("无法写入选定位置")
-                "备份已导出"
+                "当前数据已导出（暂不支持在 App 内恢复）"
             }.onSuccess { onResult(true, it) }
              .onFailure { onResult(false, it.message.orEmpty()) }
         }
@@ -820,6 +854,8 @@ class ChatViewModel(
                                 put("participantCharacterIds", conversation.participantCharacterIds)
                                 put("groupScene", conversation.groupScene)
                                 put("groupSceneLocked", conversation.groupSceneLocked)
+                                put("sceneRoleStatesJson", conversation.sceneRoleStatesJson)
+                                put("ensembleCoverageJson", conversation.ensembleCoverageJson)
                                 put(
                                     "messages",
                                     org.json.JSONArray().also { msgArray ->
@@ -1051,6 +1087,10 @@ class ChatViewModel(
         if (message.id <= 0L || message.role != "assistant" || !tryStartReply()) return
         launchReplyJob reply@{
             val conversation = conversationRepository.getById(message.conversationId) ?: return@reply
+            if (conversation.isGroupConversation()) {
+                _error.emit("群聊暂不支持单条重新生成，避免追加错误的角色回复。")
+                return@reply
+            }
             val history = messageRepository.getMessages(message.conversationId)
             val latestUserMessage = history
                 .filter {
@@ -1193,11 +1233,19 @@ class ChatViewModel(
     }
 
     private suspend fun sendMessageInternal(text: String, requestedConversationId: String?) {
+        var persistedConversation: ConversationEntity? = null
+        var userMessagePersisted = false
+        try {
             val decoded = decodeChatContent(text)
             val visibleText = decoded.text.trim()
             val previewText = visibleText.ifBlank { decoded.attachments.firstOrNull()?.name ?: "附件消息" }
 
             val conversation = ensureConversationForSend(requestedConversationId)
+            if (conversation.isGroupConversation() && getConversationParticipants(conversation).isEmpty()) {
+                _error.emit("群聊中没有可用角色，无法发送消息。")
+                return
+            }
+            persistedConversation = conversation
             val conversationId = conversation.id
             val roundId = if (ChatMessageBuilder.isGroupConversation(conversation)) UUID.randomUUID().toString() else null
             selectedConversationId.value = conversationId
@@ -1210,6 +1258,7 @@ class ChatViewModel(
                     thinkingContent = null, thinkingDuration = null, timestamp = System.currentTimeMillis()
                 )
             )
+            userMessagePersisted = true
             conversationRepository.updateLastMessage(conversation, previewText)
 
             _scrollTrigger.emit(Unit)
@@ -1218,6 +1267,15 @@ class ChatViewModel(
                 conversation = conversation,
                 userText = previewText
             )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("ChatVM", "send preparation failed", e)
+            if (userMessagePersisted && persistedConversation != null) {
+                saveLocalGenerationFailureReply(persistedConversation, breakArmorEnabled = false)
+            }
+            _error.emit("消息发送准备失败: ${e.message.orEmpty().take(80)}")
+        }
     }
 
     fun stopGeneration() {
@@ -1309,6 +1367,33 @@ class ChatViewModel(
             refreshConversationLastMessage(conversationId)
             val decoded = decodeChatContent(lastUser.content)
             requestAssistantReply(conversation, decoded.text.ifBlank { decoded.attachments.firstOrNull()?.name ?: "附件消息" })
+        }
+    }
+
+    fun retryFailedMessage(message: ChatMessageEntity) {
+        if (!message.isError || message.id <= 0L || !tryStartReply()) return
+        launchReplyJob retry@{
+            val messages = messageRepository.getMessages(message.conversationId)
+            if (messages.lastOrNull()?.id != message.id) {
+                _error.emit("这条失败提示后已有新消息。为避免删除后续对话，请从对应用户消息的菜单重新生成。")
+                return@retry
+            }
+            val userMessage = messages.lastOrNull { it.id < message.id && it.role == "user" }
+            if (userMessage == null) {
+                _error.emit("没有找到这条失败提示对应的用户消息。")
+                return@retry
+            }
+            val conversation = conversationRepository.getById(message.conversationId) ?: return@retry
+            messageRepository.delete(message.id)
+            conversationRepository.clearHistorySummary(message.conversationId)
+            rebuildCharacterStoryStateAfterHistoryChange(message.conversationId)
+            refreshConversationLastMessage(message.conversationId)
+            val decoded = decodeChatContent(userMessage.content)
+            requestAssistantReply(
+                conversation,
+                decoded.text.ifBlank { decoded.attachments.firstOrNull()?.name ?: "附件消息" },
+                historyUpToMessageId = userMessage.id
+            )
         }
     }
 
@@ -1811,16 +1896,32 @@ class ChatViewModel(
         }
         val conversationId = conversation.id
         val requestStartAt = System.currentTimeMillis()
-        val latestConversation = conversationRepository.getById(conversationId) ?: conversation
+        var latestConversation = conversationRepository.getById(conversationId) ?: conversation
+        val isCharacterChat = latestConversation.characterId != null
+        val character = if (isCharacterChat) characterRepository.getById(latestConversation.characterId!!) else null
+        val ensembleProfiles = character?.let {
+            com.hana.app.data.db.entity.parseSubCharacterProfiles(it.subCharactersJson)
+        }.orEmpty()
+        val bufferEnsembleCandidate = ensembleProfiles.isNotEmpty()
         _uiState.update {
             it.copy(
                 isSending = true,
-                streamingAssistant = StreamingAssistantState(conversationId = conversationId, startedAt = requestStartAt)
+                streamingAssistant = if (bufferEnsembleCandidate) null else {
+                    StreamingAssistantState(conversationId = conversationId, startedAt = requestStartAt)
+                }
             )
         }
-
-        val isCharacterChat = latestConversation.characterId != null
-        val character = if (isCharacterChat) characterRepository.getById(latestConversation.characterId!!) else null
+        character?.let { card ->
+            val profiles = com.hana.app.data.db.entity.parseSubCharacterProfiles(card.subCharactersJson)
+            if (profiles.isNotEmpty() && latestConversation.sceneRoleStatesJson.isBlank()) {
+                // Initialize once from card facts; a missed response never mutates availability.
+                conversationRepository.updateSceneRoleStates(
+                    conversationId,
+                    EnsembleSceneContract.serialize(EnsembleSceneContract.initialStates(profiles))
+                )
+                latestConversation = conversationRepository.getById(conversationId) ?: latestConversation
+            }
+        }
         ensureUsableConnectionSettings()
         val settingsModel = settingsRepository.getSettings().selectedModel.takeIf { it.isNotBlank() }
 
@@ -1888,8 +1989,13 @@ class ChatViewModel(
         val shouldUseVisionConfig = _uiState.value.hasVisionConfig && apiMessages.any {
             it.imageDataUrls.isNotEmpty() || it.fileTexts.isNotEmpty()
         }
+        val requestTimeoutSeconds = if (isBreakArmorEnabled(character?.id)) {
+            minOf(_uiState.value.timeoutSeconds.toLong(), 20L)
+        } else {
+            _uiState.value.timeoutSeconds.toLong()
+        }
 
-        suspend fun executeRequest() = if (_uiState.value.streamEnabled) {
+        suspend fun executeRequest() = if (_uiState.value.streamEnabled && !bufferEnsembleCandidate) {
             apiService.streamChat(
                 messages = apiMessages,
                 model = effectiveModel,
@@ -1897,8 +2003,9 @@ class ChatViewModel(
                 temperature = effectiveTemperature,
                 topP = latestConversation.topP,
                 maxTokens = latestConversation.maxTokens,
-                timeoutSeconds = _uiState.value.timeoutSeconds.toLong(),
+                timeoutSeconds = requestTimeoutSeconds,
                 webSearch = _uiState.value.webSearchEnabled,
+                uiFlushIntervalMs = streamUiFlushIntervalMs(effectiveModel),
                 onDelta = { delta ->
                     appendStreamingDeltaGradually(conversationId, requestStartAt, delta)
                 }
@@ -1911,7 +2018,7 @@ class ChatViewModel(
                 temperature = effectiveTemperature,
                 topP = latestConversation.topP,
                 maxTokens = latestConversation.maxTokens,
-                timeoutSeconds = _uiState.value.timeoutSeconds.toLong(),
+                timeoutSeconds = requestTimeoutSeconds,
                 webSearch = _uiState.value.webSearchEnabled
             ).onSuccess { result ->
                 appendStreamingDelta(
@@ -1924,7 +2031,7 @@ class ChatViewModel(
         }
 
         var streamResult = executeRequest()
-        val firstAttemptContent = _uiState.value.streamingAssistant
+        var firstAttemptContent = _uiState.value.streamingAssistant
             ?.takeIf { it.conversationId == conversationId }
             ?.content
             ?.takeIf { it.isNotBlank() }
@@ -1944,11 +2051,61 @@ class ChatViewModel(
             }
             delay(600L)
             streamResult = executeRequest()
+            firstAttemptContent = _uiState.value.streamingAssistant
+                ?.takeIf { it.conversationId == conversationId }
+                ?.content
+                ?.takeIf { it.isNotBlank() }
+                ?: streamResult.getOrNull()?.content.orEmpty()
+                .ifBlank { partialContentFromFailure(streamResult.exceptionOrNull()) }
         }
 
         if (streamResult.exceptionOrNull() is CancellationException) {
             clearStreamingState(conversationId)
             return
+        }
+
+        var ensembleStates: List<SceneRoleState> = emptyList()
+        var ensembleBudget: EnsembleCoverageBudget? = null
+        var repairAttempted = false
+        var repairRequestFailed = false
+        var repairOutcome = EnsembleRepairOutcome.FIRST_DRAFT_ACCEPTED
+        var firstEnsembleCoverage: EnsembleCoverageResult? = null
+        if (streamResult.isSuccess && character != null) {
+            val profiles = com.hana.app.data.db.entity.parseSubCharacterProfiles(character.subCharactersJson)
+            if (profiles.isNotEmpty()) {
+                ensembleStates = EnsembleSceneContract.resolveStates(latestConversation.sceneRoleStatesJson, profiles)
+                ensembleBudget = EnsembleSceneContract.budget(latestConversation.maxTokens, ensembleStates)
+                val firstCoverage = EnsembleSceneContract.evaluate(firstAttemptContent, ensembleStates)
+                firstEnsembleCoverage = firstCoverage
+                if (!firstCoverage.isComplete) {
+                    repairAttempted = true
+                    // Both drafts stay internal candidates; only the final validated candidate reaches UI.
+                    val firstCandidateResult = streamResult
+                    val repairResult = apiService.chat(
+                        messages = apiMessages + ApiService.ChatPayload(
+                            role = "system",
+                            text = EnsembleSceneContract.buildRepairProtocol(firstCoverage.missingObligations)
+                        ),
+                        model = effectiveModel,
+                        useVisionConfig = shouldUseVisionConfig,
+                        temperature = effectiveTemperature,
+                        topP = latestConversation.topP,
+                        maxTokens = latestConversation.maxTokens,
+                        timeoutSeconds = requestTimeoutSeconds,
+                        webSearch = _uiState.value.webSearchEnabled
+                    )
+                    if (repairResult.isSuccess) {
+                        streamResult = repairResult
+                    } else {
+                        repairRequestFailed = true
+                        streamResult = firstCandidateResult
+                    }
+                    repairOutcome = EnsembleSceneContract.repairOutcome(
+                        firstCoverage = firstCoverage,
+                        repairRequestSucceeded = repairResult.isSuccess
+                    )
+                }
+            }
         }
 
         streamResult.onSuccess { result ->
@@ -1971,15 +2128,12 @@ class ChatViewModel(
 
                 val cleanContent = ChatMessageBuilder.stripLeadingSpeakerPrefix(extractedThinking.content.trim(), character?.name)
                 val cleanThinking = mergedThinking
+                val breakArmorEnabled = isBreakArmorEnabled(character?.id)
 
-                if (cleanContent.isBlank()) {
-                    _error.emit(
-                        if (cleanThinking.isNotBlank()) {
-                            "模型只返回了思考内容，没有正式回答。请重试或切换模型/关闭实时打字。"
-                        } else {
-                            "AI 未返回有效回复，请重试"
-                        }
-                    )
+                if (breakArmorEnabled && isBreakArmorFailureOutput(cleanContent)) {
+                    saveLocalGenerationFailureReply(latestConversation, breakArmorEnabled = true)
+                } else if (cleanContent.isBlank()) {
+                    saveLocalGenerationFailureReply(latestConversation, breakArmorEnabled = false)
                 } else {
                     val assistantText = cleanContent
                     val responseSavedAt = System.currentTimeMillis()
@@ -2000,6 +2154,29 @@ class ChatViewModel(
                         )
                     )
 
+                    if (ensembleStates.isNotEmpty() && ensembleBudget != null) {
+                        val coverage = EnsembleSceneContract.evaluate(assistantText, ensembleStates)
+                        if (repairAttempted && !repairRequestFailed && firstEnsembleCoverage != null) {
+                            repairOutcome = EnsembleSceneContract.repairOutcome(
+                                firstCoverage = requireNotNull(firstEnsembleCoverage),
+                                repairRequestSucceeded = true,
+                                repairCoverage = coverage
+                            )
+                        }
+                        val diagnostic = EnsembleSceneContract.diagnostic(
+                            result = coverage,
+                            budget = ensembleBudget,
+                            checkedAt = responseSavedAt,
+                            repairAttempted = repairAttempted,
+                            repairSucceeded = repairOutcome == EnsembleRepairOutcome.REPAIR_ACCEPTED,
+                            repairRequestFailed = repairOutcome == EnsembleRepairOutcome.REPAIR_REQUEST_FAILED
+                        )
+                        conversationRepository.updateEnsembleCoverage(
+                            conversationId,
+                            EnsembleSceneContract.serializeDiagnostic(diagnostic)
+                        )
+                    }
+
                     val updatedConversation = conversationRepository.getById(conversationId) ?: conversation
                     conversationRepository.updateLastMessage(updatedConversation, assistantText)
                     if (updatedConversation.characterId != null) {
@@ -2018,27 +2195,20 @@ class ChatViewModel(
                         val assistantRounds = messageRepository.countByRole(conversationId, "assistant")
                         val totalRounds = minOf(userRounds, assistantRounds)
                         val knownOtherCharacters = _uiState.value.characters.filterNot { it.id == characterId }
-                        val conversationHistory = messageRepository.getMessages(conversationId)
-                        val cardRoleNames = character?.let {
-                            messageBuilder.resolveSingleCardRoleNames(it, conversationHistory)
-                        }.orEmpty()
-                        val publicSpeakers = ChatMessageBuilder.extractNamedPublicSpeakers(
-                            assistantText,
-                            cardRoleNames
-                        )
+                        // A structured ensemble card has no single owner relationship to advance.
+                        // Its continuity is handled by the independent ensemble scene contract.
+                        val structuredMultiRoleCard = character?.subCharacters()?.isNotEmpty() == true
                         val progress = advanceCharacterStoryState(
                             previous = replacementStoryState ?: getCharacterStoryState(characterId),
                             userText = userText,
                             assistantText = assistantText,
                             assistantInnerThought = cleanThinking,
                             rounds = totalRounds,
-                            directInteractionAllowed = isDirectInteractionFor(
-                                characterId = characterId,
-                                otherCharacters = knownOtherCharacters,
-                                userText = userText
-                            ),
+                            // A true single-character card always owns its successful reply.
+                            // Unrelated saved cards must not freeze its user relationship.
+                            directInteractionAllowed = !structuredMultiRoleCard,
                             otherCharacterNames = knownOtherCharacters.map { it.name },
-                            roleInteractionOnly = cardRoleNames.size >= 2 && publicSpeakers.size != 1,
+                            roleInteractionOnly = structuredMultiRoleCard,
                             timestamp = responseSavedAt
                         )
                         settingsRepository.saveCharacterStoryState(characterId, progress.state)
@@ -2069,23 +2239,25 @@ class ChatViewModel(
                 _error.emit("回复已生成，但后处理失败: ${e.message.orEmpty().take(80)}")
             }
         }.onFailure { throwable ->
-            val streamingPartial = _uiState.value.streamingAssistant
+            val partial = _uiState.value.streamingAssistant
                 ?.takeIf { it.conversationId == conversationId }
-            val failurePartial = partialResultFromFailure(throwable)
-            val visiblePartial = streamingPartial?.content?.takeIf { it.isNotBlank() }
-                ?: failurePartial?.content.orEmpty()
-            if (visiblePartial.isNotBlank()) {
+                ?.content
+                ?.takeIf { it.isNotBlank() }
+                ?: partialContentFromFailure(throwable).takeIf { it.isNotBlank() }
+            if (partial != null && (!isBreakArmorEnabled(character?.id) || !isBreakArmorFailureOutput(partial))) {
                 saveIncompleteAssistant(
-                    conversation = conversation,
+                    conversation = latestConversation,
                     character = character,
-                    content = visiblePartial,
-                    thinking = streamingPartial?.thinkingContent?.takeIf { it.isNotBlank() }
-                        ?: failurePartial?.reasoningContent.orEmpty(),
+                    content = partial,
+                    thinking = _uiState.value.streamingAssistant
+                        ?.takeIf { it.conversationId == conversationId }
+                        ?.thinkingContent.orEmpty(),
                     requestStartAt = requestStartAt,
-                    tokenCount = failurePartial?.totalTokens
+                    tokenCount = partialResultFromFailure(throwable)?.totalTokens
                 )
+            } else {
+                saveLocalGenerationFailureReply(latestConversation, isBreakArmorEnabled(character?.id))
             }
-            _error.emit(formatChatFailure(throwable))
         }
 
         clearStreamingState(conversationId)
@@ -2143,6 +2315,15 @@ class ChatViewModel(
     fun updateGroupScene(conversationId: String, scene: String, locked: Boolean) {
         viewModelScope.launch {
             conversationRepository.updateGroupScene(conversationId, scene, locked)
+        }
+    }
+
+    fun updateSceneRoleStates(conversationId: String, states: List<SceneRoleState>) {
+        viewModelScope.launch {
+            conversationRepository.updateSceneRoleStatesAndClearCoverage(
+                conversationId,
+                EnsembleSceneContract.serialize(states)
+            )
         }
     }
 
@@ -2266,6 +2447,9 @@ class ChatViewModel(
         ).any(message::contains)
     }
 
+    private fun isBreakArmorEnabled(characterId: String?): Boolean =
+        characterId != null && _uiState.value.characterCreativePresetEnabled[characterId] == true
+
     private fun partialResultFromFailure(error: Throwable?): com.hana.app.data.api.models.StreamResult? {
         return when (error) {
             is IncompleteStreamException -> error.partialResult
@@ -2312,6 +2496,25 @@ class ChatViewModel(
         val latestConversation = conversationRepository.getById(conversation.id) ?: conversation
         conversationRepository.updateLastMessage(latestConversation, cleanContent)
         latestConversation.characterId?.let { characterRepository.updateLastMessage(it, cleanContent) }
+    }
+
+    private suspend fun saveLocalGenerationFailureReply(
+        conversation: ConversationEntity,
+        breakArmorEnabled: Boolean
+    ) {
+        val content = if (breakArmorEnabled) BREAK_ARMOR_FAILURE_REPLY else NORMAL_GENERATION_FAILURE_REPLY
+        messageRepository.insert(
+            ChatMessageEntity(
+                conversationId = conversation.id,
+                role = "assistant",
+                speakerName = "Hana",
+                content = content,
+                timestamp = System.currentTimeMillis(),
+                isError = true
+            )
+        )
+        val latestConversation = conversationRepository.getById(conversation.id) ?: conversation
+        conversationRepository.updateLastMessage(latestConversation, content)
     }
 
     private suspend fun ensureConversationForSend(requestedConversationId: String?): ConversationEntity {
@@ -2510,6 +2713,7 @@ class ChatViewModel(
                 maxTokens = conversation.maxTokens,
                 timeoutSeconds = _uiState.value.timeoutSeconds.toLong(),
                 webSearch = _uiState.value.webSearchEnabled,
+                uiFlushIntervalMs = streamUiFlushIntervalMs(model),
                 onDelta = { delta -> appendStreamingDeltaGradually(conversation.id, requestStartAt, delta) }
             )
         } else {
@@ -2562,8 +2766,17 @@ class ChatViewModel(
             val quotePrevious = previousReply != null && extractedThinking.content.contains("<quote_previous/>", ignoreCase = true)
             val replyContent = extractedThinking.content.replace(Regex("<quote_previous\\s*/>", RegexOption.IGNORE_CASE), "").trim()
             val cleanContent = ChatMessageBuilder.sanitizeGroupReplyContent(replyContent, character.name, participants)
+            val breakArmorEnabled = isBreakArmorEnabled(character.id)
+            if (breakArmorEnabled && isBreakArmorFailureOutput(cleanContent)) {
+                success = false
+                viewModelScope.launch { saveLocalGenerationFailureReply(conversation, breakArmorEnabled = true) }.join()
+                return@onSuccess
+            }
             if (cleanContent.isBlank()) {
                 success = false
+                viewModelScope.launch {
+                    saveLocalGenerationFailureReply(conversation, breakArmorEnabled)
+                }.join()
                 return@onSuccess
             }
             val responseSavedAt = System.currentTimeMillis() + responseOffset
@@ -2654,31 +2867,15 @@ class ChatViewModel(
             }.join()
         }.onFailure {
             success = false
-            val streamingPartial = _uiState.value.streamingAssistant
-                ?.takeIf { state -> state.conversationId == conversation.id }
-            val failurePartial = partialResultFromFailure(it)
-            val visiblePartial = streamingPartial?.content?.takeIf { text -> text.isNotBlank() }
-                ?: failurePartial?.content.orEmpty()
-            if (visiblePartial.isNotBlank()) {
-                saveIncompleteAssistant(
-                    conversation = conversation,
-                    character = character,
-                    content = visiblePartial,
-                    thinking = streamingPartial?.thinkingContent?.takeIf { text -> text.isNotBlank() }
-                        ?: failurePartial?.reasoningContent.orEmpty(),
-                    requestStartAt = requestStartAt,
-                    tokenCount = failurePartial?.totalTokens
-                )
-            }
-            _error.emit(formatChatFailure(it))
+            saveLocalGenerationFailureReply(conversation, isBreakArmorEnabled(character.id))
         }
         return success
     }
 
-    private fun formatChatFailure(error: Throwable): String {
+    private fun formatChatFailure(error: Throwable, breakArmorEnabled: Boolean = false): String {
         return when (error) {
             is UpstreamContentBlockedException ->
-                "上游模型或 API 服务商拦截了本次内容（${error.reason.take(80)}）。破甲提示已发送，但 App 无法关闭服务端安全策略。"
+                upstreamBlockedMessage(error.reason, breakArmorEnabled)
             is IncompleteStreamException ->
                 "流式连接中断，已保留当前正文；下一轮会从这里继续。"
             is OutputTruncatedException ->

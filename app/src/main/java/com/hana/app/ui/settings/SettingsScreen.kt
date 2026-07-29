@@ -737,7 +737,7 @@ private fun MainPage(
                     }
                 }
 
-                StorageActionRow(Icons.Filled.SaveAlt, Color(0xFF10B981), "导出全部数据", "选择保存位置后导出完整备份", onClick = {
+                StorageActionRow(Icons.Filled.SaveAlt, Color(0xFF10B981), "导出当前数据", "导出对话、角色与基础设置；暂不支持在 App 内恢复", onClick = {
                     showStorageSheet = false
                     onExportAll()
                 })

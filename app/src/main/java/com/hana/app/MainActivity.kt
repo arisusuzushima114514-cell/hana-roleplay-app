@@ -505,7 +505,7 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 onPersistCameraAttachment = chatViewModel::persistCameraAttachment,
                 onSaveAttachmentImage = { uriString -> chatViewModel.saveAttachmentImage(uriString) },
                 onStopGeneration = chatViewModel::stopGeneration,
-                onRetryLastUserMessage = chatViewModel::retryLastUserMessage,
+                onRetryFailedMessage = chatViewModel::retryFailedMessage,
                 onUpdateConversationParameters = chatViewModel::updateConversationParameters,
                 onUpdateSystemPrompt = chatViewModel::updateSystemPrompt,
                 onToggleWebSearch = chatViewModel::toggleWebSearch,
@@ -549,7 +549,7 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                 onRegenerateMessage = chatViewModel::regenerateAssistantMessage,
                 onEditMessage = chatViewModel::editUserMessage,
                 onStopGeneration = chatViewModel::stopGeneration,
-                onRetryLastUserMessage = chatViewModel::retryLastUserMessage,
+                onRetryFailedMessage = chatViewModel::retryFailedMessage,
                 onUpdateConversationParameters = chatViewModel::updateConversationParameters,
                 onUpdateSystemPrompt = chatViewModel::updateSystemPrompt,
                 onToggleWebSearch = chatViewModel::toggleWebSearch,
@@ -639,6 +639,7 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                     )
                 },
                 onUpdateContextLayers = chatViewModel::updateConversationContextLayers,
+                onUpdateSceneRoleStates = chatViewModel::updateSceneRoleStates,
                 onSummarizeHistory = chatViewModel::summarizeConversationNow,
                 onClearHistorySummary = chatViewModel::clearConversationHistorySummary
             )
@@ -740,7 +741,7 @@ private fun WorkspaceApp(appContainer: AppContainer) {
                                      }
                                  },
                                 onStopGeneration = chatViewModel::stopGeneration,
-                                onRetryLastUserMessage = chatViewModel::retryLastUserMessage,
+                                onRetryFailedMessage = chatViewModel::retryFailedMessage,
                                 onRetryFromMessage = chatViewModel::retryFromUserMessage,
                                 onUpdateConversationParameters = chatViewModel::updateConversationParameters,
                                 onUpdateSystemPrompt = chatViewModel::updateSystemPrompt,
@@ -1070,7 +1071,7 @@ private fun WorkspaceApp(appContainer: AppContainer) {
         var hasShownThisSession by remember { mutableStateOf(false) }
         val settingsRepo = remember { SettingsRepository(context) }
         val currentVersion = BuildConfig.VERSION_NAME
-        val currentChangelogId = "$currentVersion-relationship-r3"
+        val currentChangelogId = "$currentVersion-release-r1"
 
         LaunchedEffect(Unit) {
             settingsRepo.getLastSeenChangelogVersion().collect { seen ->
@@ -1098,52 +1099,39 @@ private fun WorkspaceApp(appContainer: AppContainer) {
  * v1.8.0 更新内容，供弹窗显示。
  */
 private val CHANGELOG_V1_8_0 = """
-### 大量个性化
+### 个性化与聊天显示
 
-- 新增跟随系统、浅色、深色与五组推荐颜色
-- 支持应用内名称、自定义桌面入口、开屏图片与显示时长
-- 支持三个底栏图标独立选择、裁剪、清除和整组恢复
-- 支持 AI 与用户气泡图片、九宫格拉伸和固定边缘调整
-- 个性化配置和原图独立持久化，覆盖更新后继续保留
+- 新增浅色、深色、跟随系统和五组主题色
+- 支持应用显示名称、开屏图、桌面快捷方式、气泡图片和聊天布局设置
+- 可调整字号、密度、气泡宽度、输入框尺寸、头像、消息时间与底栏文字，并即时预览
 
-### 聊天显示
+### 剧情与角色关系
 
-- 新增字体大小、聊天密度、气泡最大宽度和输入框宽度
-- 输入框高度会真实改变最小高度和可见行数
-- 可控制消息头像、消息时间与底栏文字
-- 主对话、群聊和角色聊天统一使用同一套显示配置
-- 设置页提供即时预览、草稿状态和标准方案恢复
+- 角色聊天新增剧情前言：会显示在第一条消息上方，最多八行，超出自动省略
+- 单角色成功公开对话会稳定积累好感、信任、接受度和关系势能
+- 好感只记录关系进展，不会反向改写角色核心人格
+- 引用、假设、第三方转述和私密内心不再误触长期关系
+- 夫妻、未婚夫妻和伴侣/婚姻会正确显示为既定伴侣
 
-### 桌面入口与资源管理
+### 多角色与生成恢复
 
-- 自定义桌面入口支持更新已有名称和图标
-- 支持单独清除任意底栏图标、桌面图标或一侧气泡素材
-- 图片保存失败时恢复旧文件，避免个性化资源丢失
-- 超大相册图片使用采样解码，降低裁剪和旧设备开屏崩溃风险
+- 多角色支持公开参与、仅内心参与和不可参与三种场景状态
+- 角色遗漏时会进行一次内部修复和验收，减少群像剧情漏人
+- 流式断线、截断或停止时，已经生成的非空正文会保留为未完成回复
+- 失败重试不会误删后续消息；群聊单条重新生成暂时关闭，避免追加错误回合
 
-### 角色聊天与安全操作
+### 设置与数据稳定性
 
-- 模型设定、破甲提示和角色面板使用独立入口
-- 角色模型和参数按照真实请求优先级保存
-- 重新生成只针对有效助手回复
-- 重置当前对话会恢复开场白并明确重置关系状态
-- 会话、服务商和清空全部对话等危险操作补充确认
+- 模型地址会自动补齐 /v1，已有 /v1 不会重复添加
+- 刚修改模型、接口地址或密钥后立即发送，会读取真实保存的设置
+- 长文本设置输入不会再被旧保存结果覆盖
+- Room 数据库升级至 schema 20，增强历史数据库迁移兼容
+- PNG 角色卡导入加入后台处理和大小限制；空群聊会在发送前阻止写入消息
 
-### 关系与内心算法迭代
+### 已知说明
 
-- 好感、信任和紧张只由用户事件与角色公开回应成对确认，内心不再直接改写长期关系
-- 一轮复合互动按事件类型去重分析，威胁和冲突不会与告白、支持等信号重复累计
-- 引用、假设、否定、第三方转述和其他角色台词不会污染当前角色关系
-- 内心想法只用于即时状态解释，并与其他角色的公开认知严格隔离
-- 多角色公开正文按角色名前缀拆分，未闭合内心标签不会在流式输出时泄漏到正文
-- 角色间关系分析忽略私密内心、引用和假设，只记录明确公开的支持、竞争或敌意
-
-### 稳定性
-
-- 修复角色会话初始化期间快速发送可能串到主对话的问题
-- 修复数据库半迁移时重复字段导致的启动崩溃
-- 修复语言切换重建、Prompt 状态检测和生图配置污染问题
-- 补齐英文资源并通过 Debug Lint 与 Release Lint Vital
+- 当前数据导出用于保存当前对话、角色和基础设置，暂不支持 App 内完整恢复
+- 欢迎反馈真实 API 的断线恢复、桌面快捷方式刷新和多角色聊天表现
 """.trimIndent()
 
 /**

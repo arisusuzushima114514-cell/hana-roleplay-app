@@ -19,6 +19,9 @@ data class CharacterCardImportResult(
     val sourceFormat: String
 )
 
+private const val MAX_CHARACTER_CARD_BYTES = 20 * 1024 * 1024
+private const val MAX_CHARACTER_METADATA_BYTES = 2 * 1024 * 1024
+
 class CharacterRepository(
     private val dao: CharacterCardDao
 ) {
@@ -78,7 +81,7 @@ class CharacterRepository(
             lastMessageAt = existing?.lastMessageAt ?: imported.lastMessageAt,
             lastMessagePreview = existing?.lastMessagePreview ?: imported.lastMessagePreview
         )
-        save(entity)
+        require(save(entity)) { "角色卡保存失败" }
         return entity
     }
 
@@ -88,6 +91,7 @@ class CharacterRepository(
 
     suspend fun importCharacterCard(bytes: ByteArray): CharacterCardImportResult {
         require(bytes.isNotEmpty()) { "文件内容为空" }
+        require(bytes.size <= MAX_CHARACTER_CARD_BYTES) { "角色卡文件不能超过 20 MB" }
         return if (isPng(bytes)) {
             val json = extractCharacterJsonFromPng(bytes)
             CharacterCardImportResult(
@@ -225,6 +229,9 @@ class CharacterRepository(
         stream.readFully(signature)
         while (stream.available() > 0) {
             val length = stream.readInt()
+            require(length in 0..MAX_CHARACTER_METADATA_BYTES && length <= stream.available() - 8) {
+                "PNG metadata 数据异常或过大"
+            }
             val typeBytes = ByteArray(4)
             stream.readFully(typeBytes)
             val type = String(typeBytes, StandardCharsets.ISO_8859_1)
@@ -283,7 +290,17 @@ class CharacterRepository(
 
     private fun inflateText(bytes: ByteArray, charset: java.nio.charset.Charset): String? {
         return runCatching {
-            InflaterInputStream(ByteArrayInputStream(bytes)).bufferedReader(charset).use { it.readText() }
+            InflaterInputStream(ByteArrayInputStream(bytes)).bufferedReader(charset).use { reader ->
+                val buffer = CharArray(4096)
+                val output = StringBuilder()
+                while (true) {
+                    val count = reader.read(buffer)
+                    if (count < 0) break
+                    require(output.length + count <= MAX_CHARACTER_METADATA_BYTES) { "PNG metadata 解压后过大" }
+                    output.append(buffer, 0, count)
+                }
+                output.toString()
+            }
         }.getOrNull()
     }
 
