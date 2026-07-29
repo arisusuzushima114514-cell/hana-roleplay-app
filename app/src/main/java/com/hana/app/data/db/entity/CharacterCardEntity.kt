@@ -12,6 +12,7 @@ data class CharacterCardEntity(
     val description: String,
     val greeting: String,
     val userPersona: String = "",
+    val userAvatarUrl: String = "",
     val tags: String = "",
     val modelId: String = "",
     val temperature: Float = 0.9f,

@@ -27,7 +27,7 @@ import com.hana.app.data.db.entity.SavedModelEntity
         com.hana.app.data.db.entity.CachedModelEntity::class,
         MemoryEntryEntity::class
     ],
-    version = 21,
+    version = 22,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -74,7 +74,8 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_17_18,
                     MIGRATION_18_19,
                     MIGRATION_19_20,
-                    MIGRATION_20_21
+                    MIGRATION_20_21,
+                    MIGRATION_21_22
                 )
                 .addCallback(object : Callback() {
                     override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
@@ -216,6 +217,12 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_21_22 = object : androidx.room.migration.Migration(21, 22) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                addColumnIfMissing(db, "character_cards", "userAvatarUrl", "TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         private fun compatibilityMigration(from: Int, to: Int) = object : androidx.room.migration.Migration(from, to) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 ensureCompatibleSchema(db)
@@ -226,7 +233,7 @@ abstract class AppDatabase : RoomDatabase() {
             db.execSQL("""
                 CREATE TABLE IF NOT EXISTS character_cards (
                     id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, avatarUrl TEXT NOT NULL,
-                    description TEXT NOT NULL, greeting TEXT NOT NULL, userPersona TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL, greeting TEXT NOT NULL, userPersona TEXT NOT NULL DEFAULT '', userAvatarUrl TEXT NOT NULL DEFAULT '',
                     tags TEXT NOT NULL DEFAULT '', modelId TEXT NOT NULL DEFAULT '', temperature REAL NOT NULL DEFAULT 0.9,
                     createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, lastMessageAt INTEGER NOT NULL DEFAULT 0,
                     lastMessagePreview TEXT NOT NULL DEFAULT '', characterMode TEXT NOT NULL DEFAULT 'single',
@@ -234,6 +241,7 @@ abstract class AppDatabase : RoomDatabase() {
                 )
             """.trimIndent())
             addColumnIfMissing(db, "character_cards", "userPersona", "TEXT NOT NULL DEFAULT ''")
+            addColumnIfMissing(db, "character_cards", "userAvatarUrl", "TEXT NOT NULL DEFAULT ''")
             addColumnIfMissing(db, "character_cards", "tags", "TEXT NOT NULL DEFAULT ''")
             addColumnIfMissing(db, "character_cards", "modelId", "TEXT NOT NULL DEFAULT ''")
             addColumnIfMissing(db, "character_cards", "temperature", "REAL NOT NULL DEFAULT 0.9")

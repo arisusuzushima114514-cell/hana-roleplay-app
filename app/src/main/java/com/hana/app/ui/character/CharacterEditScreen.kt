@@ -30,7 +30,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -90,8 +89,10 @@ fun CharacterEditScreen(
     var greeting by remember { mutableStateOf(initialCharacter?.greeting.orEmpty()) }
     var defaultStoryPreface by remember { mutableStateOf(initialCharacter?.defaultStoryPreface.orEmpty()) }
     var userPersona by remember { mutableStateOf(initialCharacter?.userPersona.orEmpty()) }
+    var userAvatarUrl by remember { mutableStateOf(initialCharacter?.userAvatarUrl.orEmpty()) }
     var tags by remember { mutableStateOf(initialCharacter?.tags.orEmpty()) }
     var showAvatarDialog by remember { mutableStateOf(false) }
+    var showUserAvatarDialog by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showSmartImportDialog by remember { mutableStateOf(false) }
     var isSaving by remember { mutableStateOf(false) }
@@ -109,6 +110,18 @@ fun CharacterEditScreen(
             }
             avatarUrl = uri.toString()
             showAvatarDialog = false
+        }
+    }
+    val userAvatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            userAvatarUrl = uri.toString()
+            showUserAvatarDialog = false
         }
     }
 
@@ -131,6 +144,7 @@ fun CharacterEditScreen(
             description = description.trim(),
             greeting = greeting.trim(),
             userPersona = userPersona.trim(),
+            userAvatarUrl = userAvatarUrl.trim(),
             tags = tags.trim(),
             modelId = charModelId.trim(),
             temperature = charTemperature,
@@ -210,18 +224,11 @@ fun CharacterEditScreen(
                                 avatarUrl = avatarUrl,
                                 modifier = Modifier.size(92.dp)
                             )
-                        } else {
-                            Icon(
-                                Icons.Filled.Person,
-                                contentDescription = null,
-                                modifier = Modifier.size(44.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
                         }
                     }
-                    Text(if (isEdit) "继续雕刻这个角色的世界观与说话方式" else "从头像、开场白和人设开始，搭出一个有生命力的角色", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (isEdit) "继续雕刻这个角色的世界观与说话方式" else "头像可不选，先从开场白和人设开始", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
-                        text = "点击头像设置形象",
+                        text = if (avatarUrl.isBlank()) "点击空白头像添加形象" else "点击头像更换或清除",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -359,6 +366,32 @@ fun CharacterEditScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("你在这个剧本里的身份", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (userAvatarUrl.isBlank()) MaterialTheme.colorScheme.surface
+                                    else MaterialTheme.colorScheme.primaryContainer
+                                )
+                                .clickable { showUserAvatarDialog = true },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (userAvatarUrl.isNotBlank()) {
+                                CharacterAvatar(avatarUrl = userAvatarUrl, modifier = Modifier.size(56.dp))
+                            }
+                        }
+                        Text(
+                            text = if (userAvatarUrl.isBlank()) "点击空白头像添加你的形象（可不选）" else "点击头像更换或清除",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                     Spacer(modifier = Modifier.height(10.dp))
                     OutlinedTextField(
                         value = userPersona,
@@ -556,8 +589,63 @@ fun CharacterEditScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showAvatarDialog = false }) {
-                    Text(stringResource(R.string.cancel))
+                Row {
+                    if (avatarUrl.isNotBlank()) {
+                        TextButton(
+                            onClick = {
+                                avatarUrl = ""
+                                showAvatarDialog = false
+                            }
+                        ) {
+                            Text("清除头像", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    TextButton(onClick = { showAvatarDialog = false }) {
+                        Text(stringResource(R.string.cancel))
+                    }
+                }
+            }
+        )
+    }
+
+    if (showUserAvatarDialog) {
+        var urlInput by remember { mutableStateOf(userAvatarUrl) }
+        AlertDialog(
+            onDismissRequest = { showUserAvatarDialog = false },
+            title = { Text("设置用户头像") },
+            text = {
+                Column {
+                    Button(
+                        onClick = { userAvatarPicker.launch(arrayOf("image/*")) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) { Text("选择本地图片") }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = urlInput,
+                        onValueChange = { urlInput = it },
+                        label = { Text("图片链接或本地 Uri") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    userAvatarUrl = urlInput.trim()
+                    showUserAvatarDialog = false
+                }) { Text("确定") }
+            },
+            dismissButton = {
+                Row {
+                    if (userAvatarUrl.isNotBlank()) {
+                        TextButton(onClick = {
+                            userAvatarUrl = ""
+                            showUserAvatarDialog = false
+                        }) { Text("清除头像", color = MaterialTheme.colorScheme.error) }
+                    }
+                    TextButton(onClick = { showUserAvatarDialog = false }) { Text(stringResource(R.string.cancel)) }
                 }
             }
         )

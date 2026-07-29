@@ -39,6 +39,7 @@ class CharacterRepository(
             description = character.description.trim(),
             greeting = character.greeting.trim(),
             userPersona = character.userPersona.trim(),
+            userAvatarUrl = character.userAvatarUrl.trim(),
             tags = character.tags.trim(),
             modelId = character.modelId.trim(),
             temperature = character.temperature.coerceIn(0f, 2f),
@@ -76,6 +77,9 @@ class CharacterRepository(
         val existing = imported.id.takeIf { it.isNotBlank() }?.let { dao.getById(it) }
         val entity = imported.copy(
             id = existing?.id ?: imported.id.ifBlank { UUID.randomUUID().toString() },
+            // Imported cards start without a local avatar. The user can choose one from the edit screen.
+            avatarUrl = "",
+            userAvatarUrl = "",
             createdAt = existing?.createdAt ?: imported.createdAt.takeIf { it > 0L } ?: now,
             updatedAt = now,
             lastMessageAt = existing?.lastMessageAt ?: imported.lastMessageAt,

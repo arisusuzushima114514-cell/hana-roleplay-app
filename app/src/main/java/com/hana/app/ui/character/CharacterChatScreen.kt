@@ -836,9 +836,10 @@ fun CharacterChatScreen(
                                     thinkingDuration = if (isStreaming) null else message.thinkingDuration,
                                     streamingStartAt = if (isStreaming) uiState.streamingAssistant?.startedAt else null,
                                      maxWidth = maxBubbleWidth,
-                                     bubbleColors = bubbleColors,
-                                     speakerAvatarUrl = message.speakerCharacterId?.let(getCharacterById)?.avatarUrl ?: liveCharacter.avatarUrl,
-                                     showInnerThoughtEntry = showInnerThoughtEntry,
+                                      bubbleColors = bubbleColors,
+                                      speakerAvatarUrl = message.speakerCharacterId?.let(getCharacterById)?.avatarUrl ?: liveCharacter.avatarUrl,
+                                       userAvatarUrl = liveCharacter.userAvatarUrl,
+                                      showInnerThoughtEntry = showInnerThoughtEntry,
                                      textStyle = messageTextStyle,
                                     onDeleteMessage = if (isGreeting) null else onDeleteMessage,
                                     onRegenerateMessage = if (isGreeting) null else onRegenerateMessage,
@@ -1863,6 +1864,7 @@ private fun CharacterMessageBubble(
     maxWidth: Dp,
     bubbleColors: com.hana.app.ui.theme.HanaBubbleColors,
     speakerAvatarUrl: String,
+    userAvatarUrl: String,
     showInnerThoughtEntry: Boolean,
     onDeleteMessage: ((ChatMessageEntity) -> Unit)?,
     onRegenerateMessage: ((ChatMessageEntity) -> Unit)?,
@@ -2077,6 +2079,10 @@ private fun CharacterMessageBubble(
                     }
                 }
             }
+        }
+        if (isUser && chatDisplay.showAvatars && userAvatarUrl.isNotBlank()) {
+            Spacer(Modifier.width(8.dp))
+            CharacterAvatar(avatarUrl = userAvatarUrl, modifier = Modifier.size(30.dp))
         }
     }
 

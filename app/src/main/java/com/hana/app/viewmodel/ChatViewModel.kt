@@ -658,16 +658,7 @@ class ChatViewModel(
                     output.toByteArray()
                 } ?: error("无法读取所选文件")
                 val imported = characterRepository.importCharacterCard(bytes)
-                var character = imported.character
-                imported.embeddedAvatarBytes?.let { avatarBytes ->
-                    val avatarDir = java.io.File(context.filesDir, "characters")
-                    require(avatarDir.exists() || avatarDir.mkdirs()) { "无法创建角色头像目录" }
-                    val avatarFile = java.io.File(avatarDir, "${character.id}.png")
-                    avatarFile.writeBytes(avatarBytes)
-                    character = character.copy(avatarUrl = android.net.Uri.fromFile(avatarFile).toString())
-                    require(characterRepository.save(character)) { "角色卡已解析，但头像保存失败" }
-                }
-                character.name
+                imported.character.name
             }
             withContext(Dispatchers.Main) {
                 result.onSuccess { onResult(true, "已导入角色卡：$it") }
