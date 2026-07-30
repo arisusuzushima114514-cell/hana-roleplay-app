@@ -127,6 +127,14 @@ class ConversationRepository(
         updateHistorySummary(conversationId, null, null)
     }
 
+    suspend fun updateLongTermFacts(conversationId: String, facts: String?) {
+        dao.updateLongTermFacts(
+            id = conversationId,
+            longTermFacts = facts?.trim()?.takeIf { it.isNotBlank() },
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
     suspend fun updateAuthorNote(conversationId: String, authorNote: String?) {
         dao.updateAuthorNote(
             conversationId,

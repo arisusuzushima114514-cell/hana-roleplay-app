@@ -20,6 +20,9 @@ fun parseCharacterTaggedMessage(content: String, primaryName: String?): ParsedCh
     }
     val legacyInnerPatterns = listOf(
         Regex("【内心】(.*?)(?:【/内心】|$)", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
+        Regex("【内心想法】(.*?)(?:【/内心想法】|$)", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
+        Regex("<thinking>(.*?)</thinking>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
+        Regex("<thought>(.*?)</thought>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
         Regex("（内心[:：](.*?)）", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
         Regex("""\(内心[:：](.*?)\)""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
     )

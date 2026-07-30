@@ -2170,6 +2170,7 @@ class ChatViewModel(
 
                     val updatedConversation = conversationRepository.getById(conversationId) ?: conversation
                     conversationRepository.updateLastMessage(updatedConversation, assistantText)
+                    refreshLongTermFacts(updatedConversation)
                     if (updatedConversation.characterId != null) {
                         characterRepository.updateLastMessage(updatedConversation.characterId, assistantText)
                     }
@@ -2396,6 +2397,34 @@ class ChatViewModel(
         }.onFailure { error ->
             Log.w("ChatVM", "history summary failed; using local fallback for this request", error)
         }
+    }
+
+    private suspend fun refreshLongTermFacts(conversation: ConversationEntity) {
+        val eventKeywords = listOf(
+            "表白", "告白", "喜欢你", "爱你", "恋人", "交往", "接受", "答应", "承诺", "约定",
+            "婚约", "结婚", "分手", "离开", "秘密", "真相", "死亡", "怀孕", "孩子", "复仇"
+        )
+        val facts = messageRepository.getMessages(conversation.id)
+            .asSequence()
+            .filter { !it.isError && (it.role == "user" || it.role == "assistant") }
+            .mapNotNull { message ->
+                val text = ChatMessageBuilder.publicGroupContent(decodeChatContent(message.content).text)
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+                text.takeIf { candidate ->
+                    candidate.length >= 6 && eventKeywords.any(candidate::contains)
+                }?.let { candidate ->
+                    val speaker = if (message.role == "user") "用户" else message.speakerName?.takeIf { it.isNotBlank() } ?: "角色"
+                    "- [$speaker] ${candidate.take(220)}"
+                }
+            }
+            .distinct()
+            .toList()
+            .takeLast(18)
+        conversationRepository.updateLongTermFacts(
+            conversation.id,
+            facts.takeIf { it.isNotEmpty() }?.joinToString("\n")
+        )
     }
 
 

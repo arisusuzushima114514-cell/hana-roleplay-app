@@ -27,7 +27,7 @@ import com.hana.app.data.db.entity.SavedModelEntity
         com.hana.app.data.db.entity.CachedModelEntity::class,
         MemoryEntryEntity::class
     ],
-    version = 22,
+    version = 23,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -75,7 +75,8 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_18_19,
                     MIGRATION_19_20,
                     MIGRATION_20_21,
-                    MIGRATION_21_22
+                    MIGRATION_21_22,
+                    MIGRATION_22_23
                 )
                 .addCallback(object : Callback() {
                     override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
@@ -223,6 +224,12 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_22_23 = object : androidx.room.migration.Migration(22, 23) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                addColumnIfMissing(db, "conversations", "longTermFacts", "TEXT")
+            }
+        }
+
         private fun compatibilityMigration(from: Int, to: Int) = object : androidx.room.migration.Migration(from, to) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 ensureCompatibleSchema(db)
@@ -258,7 +265,7 @@ abstract class AppDatabase : RoomDatabase() {
                     createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, lastMessage TEXT, isNamed INTEGER NOT NULL DEFAULT 0,
                     modelName TEXT, temperature REAL NOT NULL DEFAULT 0.7, topP REAL NOT NULL DEFAULT 1.0,
                     maxTokens INTEGER NOT NULL DEFAULT 8192, contextLimit INTEGER NOT NULL DEFAULT 36,
-                     systemPrompt TEXT, historySummary TEXT, authorNote TEXT, worldInfo TEXT,
+                     systemPrompt TEXT, historySummary TEXT, longTermFacts TEXT, authorNote TEXT, worldInfo TEXT,
                       groupScene TEXT, groupSceneLocked INTEGER NOT NULL DEFAULT 0, sceneRoleStatesJson TEXT NOT NULL DEFAULT '', ensembleCoverageJson TEXT NOT NULL DEFAULT '',
                     summaryUpToMessageId INTEGER, totalTokens INTEGER NOT NULL DEFAULT 0, isPinned INTEGER NOT NULL DEFAULT 0,
                     isFavorite INTEGER NOT NULL DEFAULT 0
@@ -278,6 +285,7 @@ abstract class AppDatabase : RoomDatabase() {
             addColumnIfMissing(db, "conversations", "contextLimit", "INTEGER NOT NULL DEFAULT 36")
             addColumnIfMissing(db, "conversations", "systemPrompt", "TEXT")
             addColumnIfMissing(db, "conversations", "historySummary", "TEXT")
+            addColumnIfMissing(db, "conversations", "longTermFacts", "TEXT")
             addColumnIfMissing(db, "conversations", "authorNote", "TEXT")
             addColumnIfMissing(db, "conversations", "worldInfo", "TEXT")
             addColumnIfMissing(db, "conversations", "groupScene", "TEXT")

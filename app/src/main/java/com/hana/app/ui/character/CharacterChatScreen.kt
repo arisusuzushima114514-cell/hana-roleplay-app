@@ -511,6 +511,12 @@ fun CharacterChatScreen(
                             Text("角色主线", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
                         }
                     }
+                    IconButton(
+                        onClick = { activeEditorScreen = CharacterEditorScreen.CreativePreset },
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(Icons.Filled.AutoAwesome, contentDescription = "创作预设", tint = MaterialTheme.colorScheme.primary)
+                    }
                     // 三点菜单（收纳所有功能）
                     Box {
                         IconButton(onClick = { moreMenuExpanded = true }, modifier = Modifier.size(40.dp)) {
@@ -839,7 +845,7 @@ fun CharacterChatScreen(
                                       bubbleColors = bubbleColors,
                                       speakerAvatarUrl = message.speakerCharacterId?.let(getCharacterById)?.avatarUrl ?: liveCharacter.avatarUrl,
                                        userAvatarUrl = liveCharacter.userAvatarUrl,
-                                      showInnerThoughtEntry = showInnerThoughtEntry,
+                                       showInnerThoughtEntry = showInnerThoughtEntry,
                                      textStyle = messageTextStyle,
                                     onDeleteMessage = if (isGreeting) null else onDeleteMessage,
                                     onRegenerateMessage = if (isGreeting) null else onRegenerateMessage,
@@ -1590,7 +1596,7 @@ private fun RelationshipAnchorDialog(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun CharacterCreativePresetScreen(
     characterName: String,
@@ -1607,6 +1613,28 @@ private fun CharacterCreativePresetScreen(
 ) {
     var localPresetText by remember(presetText) { mutableStateOf(presetText) }
     val isBreakArmor = title == "破甲提示"
+    val quickPresets = listOf(
+        "细腻剧情" to """【叙事目标】以第三人称小说叙事推进本轮剧情，先准确回应用户本轮写出的每个动作、台词、条件和时间顺序，再自然延展当前场景。
+【描写要求】每个关键反应至少包含可观察的动作或神态、符合角色人设的台词、环境或身体细节中的一项。情绪通过停顿、视线、呼吸、动作选择和措辞体现，不要只用‘很开心’‘很难过’直接概括。
+【剧情节奏】不跳过用户给出的过程，不擅自把场景推进到告白、和解、冲突结束或离场。用户要求其他在场角色后续反应时，补足尚未回应者的自然反应后再收束。
+【用户边界】只回应用户明确写出的言行，不代写用户未声明的台词、心理、决定或后续动作。""",
+        "多角色续写" to """【角色分工】分别保留每个在场角色的身份、语气、目标、情绪和已知信息。公开发言使用‘准确角色名：’开头；动作旁白紧贴对应角色段落，避免把多人反应合并成同一种口吻。
+【回应顺序】优先用户明确点名者、当前事件直接相关者和此前尚未回应者。角色较多时可分批回应，但不得把未发言者写成已经同意、拒绝或知情。
+【知情边界】角色只能依据公开台词、公开动作、亲历、目击、听见、明确转述或公开证据行动。A的私密想法、缺席时发生的事和不在场信息不能自动传给B。
+【续写要求】回应完用户最后一个剧情点后，若仍有明确在场且相关的角色未回应，继续给出其符合人设的短反应，不要立刻结束。""",
+        "推理悬疑" to """【推理原则】严格区分已经确认的事实、角色的证词、角色的猜测和仍未解决的疑点。时间、地点、物证、人物在场状态、目击条件和信息来源必须前后一致。
+【禁止越界】没有公开证据或合理推导时，不让角色突然知道真相；不要为了推进剧情凭空制造新线索、修改既有证词或直接揭晓谜底。
+【回应方式】角色可以提出怀疑、追问、比对矛盾、检查物证或暂时保留判断，但要说清推理依据。用户给出新线索时，先写各角色如何理解或质疑该线索，再决定是否推进调查。
+【节奏】每轮只推进一个明确调查步骤，保留未解问题和后续可验证的线索，不要仓促结案。""",
+        "沉浸对话" to """【表达方式】以角色自然对话为主，搭配必要而克制的动作和表情描写。台词要符合角色既定口吻、称呼习惯和关系距离，避免长篇旁白淹没交流。
+【场景连续】承接上一轮刚发生的动作、位置、物品和情绪，不重复复述已知信息。用户的每一句话都应得到对应回应，不要只挑其中最后一句回答。
+【边界】不输出作者说明、剧情总结、选项列表、系统提示或出戏评论；不替用户决定行动。角色可以沉默、转移话题或反问，但应通过具体反应表现原因。
+【篇幅】保持一到数个自然段，依剧情需要展开，不用无意义省略号或模板化收尾。""",
+        "简洁对话" to """【目标】保持角色口吻，用简洁、自然、有来有回的对话推进当前场景。
+【输出】优先写角色的直接回应，必要时补一两处动作、表情或环境细节。每次只推进当前用户明确提出的内容，不重复旧剧情，不写总结或选项。
+【角色一致性】保留既定人设、关系和知情边界；不知道的事可以询问或表现怀疑，不要编造答案。
+【用户边界】不代写用户心理、台词、动作或决定。"""
+    )
     Scaffold(
         topBar = {
             TopAppBar(
@@ -1690,6 +1718,19 @@ private fun CharacterCreativePresetScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Text("快速选择", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    quickPresets.forEach { (label, text) ->
+                        AssistChip(
+                            onClick = {
+                                localPresetText = text
+                                onPresetTextChange(text)
+                                onEnabledChange(true)
+                            },
+                            label = { Text(label) }
+                        )
+                    }
+                }
                 OutlinedTextField(
                     value = localPresetText,
                     onValueChange = {
@@ -1712,6 +1753,16 @@ private fun CharacterCreativePresetScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+            Button(
+                onClick = {
+                    if (!isBreakArmor) onPresetTextChange(localPresetText)
+                    onBack()
+                },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text("保存并返回")
             }
         }
     }

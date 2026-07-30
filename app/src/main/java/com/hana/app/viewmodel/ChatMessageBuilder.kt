@@ -302,6 +302,9 @@ class ChatMessageBuilder(
                         "$it\n【旧历史摘要结束】"
                 )
             }
+            conversation?.longTermFacts?.trim()?.takeIf { it.isNotBlank() }?.let {
+                add("【长期关键事实·不可因普通摘要遗漏】\n${it.take(2_400)}\n【长期关键事实结束】")
+            }
             if (!breakArmorAnchorMode) {
                 buildContextSummary(uncoveredOlderMessages).takeIf { it.isNotBlank() }?.let(::add)
             } else {
@@ -320,6 +323,9 @@ class ChatMessageBuilder(
                     )
                 )
                 add(buildCreativePresetExecutionReminder(characterCreativePresetText))
+            }
+            if (conversationCharacter != null && !creativePresetForbidsExtraStructure(activeCreativePresetText)) {
+                add("【内心想法格式·本轮必须保留】回复公开正文后，必须使用<inner>...</inner>写当前实际回应角色未说出口的1-2句具体情绪或念头。多角色时使用<inner character=\"准确角色名\">...</inner>分别标注；该标签会由 Hana 单独显示，不能写进公开对白。即使本轮剧情平静也要输出，不得省略、改写成公开旁白、<thinking>或其他格式。")
             }
             singleCardTurnContext.takeIf { it.isNotBlank() }?.let(::add)
             sceneContractLayer.takeIf { it.isNotBlank() }?.let(::add)
@@ -490,6 +496,7 @@ class ChatMessageBuilder(
             if (listOf("尽可能长", "不能少", "极其细致", "详尽", "极限扩写", "无上限颗粒度").any { text.contains(it) }) {
                 append("在当前 max_tokens 范围内优先充分展开细节，不得用数段短文草率收尾。")
             }
+            append("对用户本轮每一个明确剧情点，先回应该点本身；若用户要求其他在场角色后续反应，必须在同一回复继续写出尚未回应角色的自然动作、表情或台词，不能在最后一个点刚回应完就停止。")
             append("若历史回复与上述规则冲突，以当前创作预设为准。")
         }
     }

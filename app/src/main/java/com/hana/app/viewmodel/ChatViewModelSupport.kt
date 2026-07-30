@@ -345,8 +345,14 @@ fun deriveInitialCharacterStoryState(character: CharacterCardEntity?): Character
     if (character == null) return CharacterStoryState()
     val profile = detectInitialRelationshipProfile(character.userPersona, allowGeneric = true)
         ?: detectInitialRelationshipProfile(character.tags, allowGeneric = true)
-        ?: detectInitialRelationshipProfile(character.greeting, allowGeneric = false)
-        ?: detectInitialRelationshipProfile(character.description, allowGeneric = false)
+        // A card description can contain relationships between its own cast. Only derive the
+        // user relationship when the text explicitly points to the user.
+        ?: character.greeting.takeIf(::explicitlyReferencesUser)?.let {
+            detectInitialRelationshipProfile(it, allowGeneric = false)
+        }
+        ?: character.description.takeIf(::explicitlyReferencesUser)?.let {
+            detectInitialRelationshipProfile(it, allowGeneric = false)
+        }
     return if (profile != null) {
         CharacterStoryState(
             relationshipAnchor = profile.relationshipAnchor,
@@ -361,6 +367,11 @@ fun deriveInitialCharacterStoryState(character: CharacterCardEntity?): Character
     } else {
         CharacterStoryState()
     }
+}
+
+private fun explicitlyReferencesUser(text: String): Boolean {
+    val normalized = text.lowercase()
+    return listOf("你", "用户", "{{user}}", "<user>", "user").any(normalized::contains)
 }
 
 private fun detectInitialRelationshipProfile(text: String, allowGeneric: Boolean): InitialRelationshipProfile? {

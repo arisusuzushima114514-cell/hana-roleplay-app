@@ -84,6 +84,9 @@ interface ConversationDao {
         updatedAt: Long
     )
 
+    @Query("UPDATE conversations SET longTermFacts = :longTermFacts, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateLongTermFacts(id: String, longTermFacts: String?, updatedAt: Long)
+
     @Query("UPDATE conversations SET authorNote = :authorNote, updatedAt = :updatedAt WHERE id = :id")
     suspend fun updateAuthorNote(id: String, authorNote: String?, updatedAt: Long)
 

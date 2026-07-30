@@ -24,6 +24,7 @@ data class ConversationEntity(
     val contextLimit: Int = 36,
     val systemPrompt: String? = null,
     val historySummary: String? = null,
+    val longTermFacts: String? = null,
     val authorNote: String? = null,
     val worldInfo: String? = null,
     val groupScene: String? = null,

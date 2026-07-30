@@ -2147,7 +2147,14 @@ private fun ImageCropEditor(
     var frameSize by remember { mutableStateOf(IntSize.Zero) }
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
-    Column(Modifier.fillMaxSize().background(Color(0xFF0B0C10)).safeDrawingPadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0B0C10))
+            .safeDrawingPadding()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, null, tint = Color.White) }
             Text(title, color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -2156,44 +2163,51 @@ private fun ImageCropEditor(
             Text("拖动调整位置，双指缩放。方框内是最终效果。", modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.68f), style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = { scale = 1f; offset = Offset.Zero }) { Text("复位", color = Color.White) }
         }
-        Box(
-            Modifier
+        BoxWithConstraints(
+            modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(frameAspectRatio)
-                .clip(RoundedCornerShape(24.dp))
-                .background(Color.Black)
-                .onSizeChanged { frameSize = it }
-                .pointerInput(bitmap, frameSize) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        scale = (scale * zoom).coerceIn(1f, 6f)
-                        if (frameSize.width > 0 && frameSize.height > 0) {
-                            val baseScale = maxOf(frameSize.width.toFloat() / bitmap.width, frameSize.height.toFloat() / bitmap.height)
-                            val maxX = ((bitmap.width * baseScale * scale - frameSize.width) / 2f).coerceAtLeast(0f)
-                            val maxY = ((bitmap.height * baseScale * scale - frameSize.height) / 2f).coerceAtLeast(0f)
-                            offset = Offset(
-                                x = (offset.x + pan.x).coerceIn(-maxX, maxX),
-                                y = (offset.y + pan.y).coerceIn(-maxY, maxY)
-                            )
-                        }
-                    }
-                },
+                .weight(1f),
             contentAlignment = Alignment.Center
         ) {
-            androidx.compose.foundation.Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().graphicsLayer { scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y }
-            )
-            Box(Modifier.matchParentSize().border(2.dp, Color.White, RoundedCornerShape(24.dp)))
+            val frameWidth = minOf(maxWidth, maxHeight * frameAspectRatio)
+            Box(
+                Modifier
+                    .width(frameWidth)
+                    .aspectRatio(frameAspectRatio)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(Color.Black)
+                    .onSizeChanged { frameSize = it }
+                    .pointerInput(bitmap, frameSize) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            scale = (scale * zoom).coerceIn(1f, 6f)
+                            if (frameSize.width > 0 && frameSize.height > 0) {
+                                val baseScale = maxOf(frameSize.width.toFloat() / bitmap.width, frameSize.height.toFloat() / bitmap.height)
+                                val maxX = ((bitmap.width * baseScale * scale - frameSize.width) / 2f).coerceAtLeast(0f)
+                                val maxY = ((bitmap.height * baseScale * scale - frameSize.height) / 2f).coerceAtLeast(0f)
+                                offset = Offset(
+                                    x = (offset.x + pan.x).coerceIn(-maxX, maxX),
+                                    y = (offset.y + pan.y).coerceIn(-maxY, maxY)
+                                )
+                            }
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.foundation.Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().graphicsLayer { scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y }
+                )
+                Box(Modifier.matchParentSize().border(2.dp, Color.White, RoundedCornerShape(24.dp)))
+            }
         }
-        Spacer(Modifier.weight(1f))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f), colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)) { Text("取消") }
             Button(
                 onClick = { if (frameSize.width > 0 && frameSize.height > 0) onConfirm(cropTransformedBitmap(bitmap, frameSize, scale, offset, outputSize)) },
                 modifier = Modifier.weight(1f)
-            ) { Text("使用此裁剪") }
+            ) { Text("保存并使用此裁剪") }
         }
     }
 }

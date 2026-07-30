@@ -15,7 +15,6 @@ import java.util.zip.InflaterInputStream
 
 data class CharacterCardImportResult(
     val character: CharacterCardEntity,
-    val embeddedAvatarBytes: ByteArray? = null,
     val sourceFormat: String
 )
 
@@ -100,7 +99,6 @@ class CharacterRepository(
             val json = extractCharacterJsonFromPng(bytes)
             CharacterCardImportResult(
                 character = importCharacterCardJson(json),
-                embeddedAvatarBytes = bytes,
                 sourceFormat = "png"
             )
         } else {
